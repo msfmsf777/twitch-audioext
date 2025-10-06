@@ -48,6 +48,16 @@ async function copyStatic() {
   await fs.mkdir(path.join(outDir, 'popup'), { recursive: true });
   await fs.copyFile(path.join(srcDir, 'popup/index.html'), path.join(outDir, 'popup/index.html'));
   await fs.copyFile(path.join(srcDir, 'popup/styles/main.css'), path.join(outDir, 'popup/styles.css'));
+
+  const assetsSrc = path.join(srcDir, 'assets');
+  const assetsDest = path.join(outDir, 'assets');
+  try {
+    await fs.cp(assetsSrc, assetsDest, { recursive: true });
+  } catch (error) {
+    if ((error?.code ?? error?.['code']) !== 'ENOENT') {
+      throw error;
+    }
+  }
 }
 
 async function copyLocales() {

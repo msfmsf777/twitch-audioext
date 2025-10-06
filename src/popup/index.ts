@@ -5,7 +5,8 @@ import {
   type BindingDefinition,
   type BindingEventType,
   type PopupPersistentState,
-  type SubTier
+  type SubTier,
+  type TestEventType
 } from '../shared/state';
 
 const appRoot = document.getElementById('app');
@@ -157,6 +158,7 @@ class PopupApp {
   private toast: ToastManager;
   private confirmDialog: ConfirmDialog;
   private languageMenuOpen = false;
+  private readonly twitchIconUrl = chrome.runtime.getURL('assets/icons/twitch.svg');
 
   constructor(private readonly root: HTMLElement) {
     this.toast = new ToastManager(root);
@@ -398,10 +400,70 @@ class PopupApp {
     this.render();
   }
 
-  private updateTestEvents(updater: (state: PopupPersistentState['testEvents']) => PopupPersistentState['testEvents']): void {
-    this.state = { ...this.state, testEvents: updater(this.state.testEvents) };
-    this.render();
+  private updateTestEvents(
+    update: Partial<PopupPersistentState['testEvents']>,
+    options: { rerender?: boolean } = {}
+  ): void {
+    this.state = { ...this.state, testEvents: { ...this.state.testEvents, ...update } };
+    if (options.rerender) {
+      this.render();
+    }
     void this.persistState();
+  }
+
+  private formatSemitoneLabel(): string {
+    const value = this.state.semitoneOffset;
+    const prefix = value > 0 ? '+' : value < 0 ? '−' : '';
+    const magnitude = Math.abs(value);
+    const unitKey = magnitude === 1 ? i18n.t('transpose.unitSingle') : i18n.t('transpose.unitPlural');
+    const number = prefix ? `${prefix}${magnitude}` : `${magnitude}`;
+    return `${number} ${unitKey}`.trim();
+  }
+
+  private formatSpeedLabel(): string {
+    return `${this.state.speedPercent}%`;
+  }
+
+  private getTwitchConnectionState(): {
+    status: string;
+    button: string;
+    tone: 'connected' | 'warning' | 'disconnected';
+    connected: boolean;
+  } {
+    if (this.state.loggedIn) {
+      return {
+        status: i18n.t('twitch.statusConnected', { displayName: this.state.twitchDisplayName ?? '—' }),
+        button: i18n.t('twitch.disconnect'),
+        tone: 'connected',
+        connected: true
+      };
+    }
+    if (this.state.twitchDisplayName) {
+      return {
+        status: i18n.t('twitch.statusReconnect'),
+        button: i18n.t('twitch.reconnect'),
+        tone: 'warning',
+        connected: false
+      };
+    }
+    return {
+      status: i18n.t('twitch.statusDisconnected'),
+      button: i18n.t('twitch.connect'),
+      tone: 'disconnected',
+      connected: false
+    };
+  }
+
+  private testEventNeedsAmount(type: TestEventType): boolean {
+    return type === 'bits' || type === 'gift_sub';
+  }
+
+  private testEventNeedsReward(type: TestEventType): boolean {
+    return type === 'channel_points';
+  }
+
+  private testEventNeedsTier(type: TestEventType): boolean {
+    return type === 'sub';
   }
 
   private adjustSemitone(delta: number): void {
@@ -477,11 +539,47 @@ class PopupApp {
   }
 
   private handleFireTest(): void {
+    if (!this.state.loggedIn) {
+      return;
+    }
+
+    const { testEvents } = this.state;
+    const name = testEvents.username.trim();
+    const errors: string[] = [];
+
+    if (!name) {
+      errors.push('username');
+    }
+
+    let amountValue: number | null = null;
+    if (this.testEventNeedsAmount(testEvents.type)) {
+      if (!testEvents.amount.trim()) {
+        errors.push('amount');
+      } else {
+        const parsed = Number.parseFloat(testEvents.amount);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          errors.push('amount');
+        } else {
+          amountValue = parsed;
+        }
+      }
+    }
+
+    if (this.testEventNeedsReward(testEvents.type) && !testEvents.channelPointsRewardId) {
+      errors.push('reward');
+    }
+
+    if (errors.length > 0) {
+      this.toast.show(i18n.t('toasts.testInvalid'));
+      return;
+    }
+
     const payload = {
-      channelPointsRewardId: this.state.testEvents.channelPointsRewardId,
-      bits: this.state.testEvents.bits,
-      giftSubs: this.state.testEvents.giftSubs,
-      subTiers: this.state.testEvents.subTiers
+      type: testEvents.type,
+      username: name,
+      amount: amountValue,
+      rewardId: testEvents.channelPointsRewardId,
+      subTier: testEvents.subTier
     };
     console.info('[popup] Test event payload', payload);
     this.toast.show(i18n.t('toasts.testFired'));
@@ -497,14 +595,17 @@ class PopupApp {
       const newValue = `${el.value.slice(0, start)}${selection}${el.value.slice(end)}`;
       el.value = newValue;
       el.setSelectionRange(start + selection.length, start + selection.length);
-      this.bindingDraft.chatTemplate = newValue;
-      this.render();
+      this.updateBindingDraft({ chatTemplate: newValue });
     }
   }
-  private updateBindingDraft(update: Partial<BindingDraft>): void {
+  private updateBindingDraft(update: Partial<BindingDraft>, options: { rerender?: boolean } = {}): void {
     if (!this.bindingDraft) return;
     this.bindingDraft = { ...this.bindingDraft, ...update };
-    this.render();
+    if (options.rerender) {
+      this.render();
+    } else {
+      this.refreshBindingEditorSaveState();
+    }
   }
 
   private updateBindingDraftTier(tier: SubTier, checked: boolean): void {
@@ -513,7 +614,29 @@ class PopupApp {
     if (checked) tiers.add(tier);
     else tiers.delete(tier);
     this.bindingDraft = { ...this.bindingDraft, subTiers: Array.from(tiers) };
-    this.render();
+    this.refreshBindingEditorSaveState();
+  }
+
+  private refreshBindingEditorSaveState(): void {
+    if (this.view !== 'bindingEditor') return;
+    const saveButton = this.root.querySelector<HTMLButtonElement>('[data-action="save-binding"]');
+    if (saveButton) {
+      saveButton.disabled = !this.bindingDraftIsValid();
+    }
+    const amountInput = this.root.querySelector<HTMLInputElement>('input[name="amount"]');
+    if (amountInput) {
+      let hint = '';
+      if (this.bindingDraft?.action === 'pitch') {
+        hint = i18n.t('bindings.amountHintPitch');
+      } else if (this.bindingDraft?.action === 'speed') {
+        hint = i18n.t('bindings.amountHintSpeed');
+      }
+      if (hint) {
+        amountInput.placeholder = hint;
+      } else {
+        amountInput.removeAttribute('placeholder');
+      }
+    }
   }
 
   private buildMainView(): string {
@@ -528,17 +651,7 @@ class PopupApp {
       )
       .join('');
 
-    const twitchStatus = this.state.loggedIn
-      ? i18n.t('twitch.statusConnected', { displayName: this.state.twitchDisplayName ?? '—' })
-      : i18n.t('twitch.statusDisconnected');
-
-    const twitchButtonLabel = this.state.loggedIn
-      ? i18n.t('twitch.disconnect')
-      : this.state.twitchDisplayName
-      ? i18n.t('twitch.reconnect')
-      : i18n.t('twitch.connect');
-
-    const testDisabled = !this.state.loggedIn;
+    const connection = this.getTwitchConnectionState();
 
     return `
       <div class="popup">
@@ -554,9 +667,9 @@ class PopupApp {
         <main class="popup__content">
           ${this.renderTransposeBlock()}
           ${this.renderSpeedBlock()}
-          ${this.renderTwitchRow(twitchStatus, twitchButtonLabel)}
-          ${this.renderTestEventsBlock(testDisabled)}
-          ${this.renderBindingsEntry()}
+          ${this.renderTwitchSection()}
+          ${this.renderBindingsEntry(connection.connected)}
+          ${this.renderTestEventsBlock()}
         </main>
         ${this.renderDiagnosticsPanel()}
       </div>
@@ -564,17 +677,42 @@ class PopupApp {
   }
 
   private renderTransposeBlock(): string {
+    const label = this.formatSemitoneLabel();
     return `
-      <section class="panel">
-        <div class="panel__header">
-          <h2>${i18n.t('transpose.title')}</h2>
-          <span class="panel__value">${this.state.semitoneOffset > 0 ? '+' : ''}${this.state.semitoneOffset}</span>
+      <section class="control-block" aria-labelledby="transpose-heading">
+        <div class="control-block__row control-block__row--top">
+          <h2 id="transpose-heading" class="control-block__title">${i18n.t('transpose.title')}</h2>
+          <span class="control-block__value" aria-live="polite">${label}</span>
+          <button type="button" class="btn btn--ghost control-block__reset" data-action="transpose-reset">
+            ${i18n.t('transpose.reset')}
+          </button>
         </div>
-        <input type="range" min="-12" max="12" step="1" value="${this.state.semitoneOffset}" data-role="transpose-slider" />
-        <div class="panel__controls">
-          <button class="btn" data-action="transpose-decrement">${i18n.t('transpose.decrement')}</button>
-          <button class="btn" data-action="transpose-increment">${i18n.t('transpose.increment')}</button>
-          <button class="btn btn--secondary" data-action="transpose-reset">${i18n.t('transpose.reset')}</button>
+        <div class="control-block__row control-block__row--controls">
+          <button
+            type="button"
+            class="stepper"
+            data-action="transpose-decrement"
+            aria-label="${i18n.t('transpose.decrementLabel')}"
+          >
+            −
+          </button>
+          <input
+            type="range"
+            min="-12"
+            max="12"
+            step="1"
+            value="${this.state.semitoneOffset}"
+            data-role="transpose-slider"
+            aria-labelledby="transpose-heading"
+          />
+          <button
+            type="button"
+            class="stepper"
+            data-action="transpose-increment"
+            aria-label="${i18n.t('transpose.incrementLabel')}"
+          >
+            +
+          </button>
         </div>
       </section>
     `;
@@ -582,113 +720,191 @@ class PopupApp {
 
   private renderSpeedBlock(): string {
     return `
-      <section class="panel">
-        <div class="panel__header">
-          <h2>${i18n.t('speed.title')}</h2>
-          <span class="panel__value">${this.state.speedPercent}%</span>
+      <section class="control-block" aria-labelledby="speed-heading">
+        <div class="control-block__row control-block__row--top">
+          <h2 id="speed-heading" class="control-block__title">${i18n.t('speed.title')}</h2>
+          <span class="control-block__value" aria-live="polite">${this.formatSpeedLabel()}</span>
+          <button type="button" class="btn btn--ghost control-block__reset" data-action="speed-reset">
+            ${i18n.t('speed.reset')}
+          </button>
         </div>
-        <input type="range" min="50" max="200" step="1" value="${this.state.speedPercent}" data-role="speed-slider" />
-        <div class="panel__controls">
-          <button class="btn" data-action="speed-decrement">${i18n.t('transpose.decrement')}</button>
-          <button class="btn" data-action="speed-increment">${i18n.t('transpose.increment')}</button>
-          <button class="btn btn--secondary" data-action="speed-reset">${i18n.t('transpose.reset')}</button>
+        <div class="control-block__row control-block__row--controls">
+          <button
+            type="button"
+            class="stepper"
+            data-action="speed-decrement"
+            aria-label="${i18n.t('speed.decrementLabel')}"
+          >
+            −
+          </button>
+          <input
+            type="range"
+            min="50"
+            max="200"
+            step="1"
+            value="${this.state.speedPercent}"
+            data-role="speed-slider"
+            aria-labelledby="speed-heading"
+          />
+          <button
+            type="button"
+            class="stepper"
+            data-action="speed-increment"
+            aria-label="${i18n.t('speed.incrementLabel')}"
+          >
+            +
+          </button>
         </div>
       </section>
     `;
   }
 
-  private renderTwitchRow(status: string, buttonLabel: string): string {
+  private renderTwitchSection(): string {
+    const meta = this.getTwitchConnectionState();
+    const iconUrl = this.twitchIconUrl;
     return `
-      <section class="twitch-row">
-        <div class="twitch-row__status">
-          <span class="twitch-row__icon">🟣</span>
-          <span class="twitch-row__text">${status}</span>
-        </div>
-        <div class="twitch-row__actions">
-          <button class="btn btn--primary" data-action="twitch-button">${buttonLabel}</button>
-          <label class="toggle">
-            <input type="checkbox" data-role="capture-toggle" ${this.state.captureEvents ? 'checked' : ''} />
-            <span class="toggle__label" title="${i18n.t('twitch.captureTooltip')}">
-              ${i18n.t('twitch.captureToggle')}
+      <section class="twitch-card" aria-label="${i18n.t('twitch.sectionLabel')}">
+        <div class="twitch-card__row">
+          <div class="twitch-card__identity">
+            <span class="twitch-card__logo twitch-card__logo--${meta.tone}">
+              <img src="${iconUrl}" alt="${i18n.t('twitch.logoAlt')}" width="24" height="24" />
             </span>
+            <span class="twitch-card__status">${meta.status}</span>
+          </div>
+          <button type="button" class="btn btn--primary" data-action="twitch-button">${meta.button}</button>
+        </div>
+        <div class="twitch-card__row twitch-card__row--secondary">
+          <label class="toggle" data-role="capture-toggle-wrapper">
+            <input type="checkbox" data-role="capture-toggle" ${this.state.captureEvents ? 'checked' : ''} />
+            <span class="toggle__label">${i18n.t('twitch.captureToggle')}</span>
           </label>
+          <button
+            type="button"
+            class="info-icon"
+            title="${i18n.t('twitch.captureTooltip')}"
+            aria-label="${i18n.t('twitch.captureTooltip')}"
+            data-role="capture-tooltip"
+          >
+            ?
+          </button>
         </div>
       </section>
     `;
   }
 
-  private renderTestEventsBlock(disabled: boolean): string {
-    const { testEvents } = this.state;
-    const bitsExactChecked = testEvents.bits.mode === 'exact';
-    const giftExactChecked = testEvents.giftSubs.mode === 'exact';
-    const subTiers = testEvents.subTiers;
+  private renderTestEventsBlock(): string {
+    if (!this.state.loggedIn) {
+      return `
+        <section class="test-events test-events--placeholder" aria-label="${i18n.t('testEvents.title')}">
+          <div class="test-events__header">
+            <h2 class="test-events__title">${i18n.t('testEvents.title')}</h2>
+            <span class="test-events__hint">${i18n.t('testEvents.requiresLogin')}</span>
+          </div>
+        </section>
+      `;
+    }
 
-    return `
-      <section class="panel test-events ${disabled ? 'panel--disabled' : ''}">
-        <div class="panel__header">
-          <h2>${i18n.t('testEvents.title')}</h2>
-          ${disabled ? `<span class="badge">${i18n.t('testEvents.requiresLogin')}</span>` : ''}
-        </div>
-        <div class="test-events__fields">
-          <label class="field">
-            <span>${i18n.t('bindings.channelPoints')}</span>
-            <select name="test-channel-points" ${disabled ? 'disabled' : ''}>
+    const { testEvents } = this.state;
+    const needsAmount = this.testEventNeedsAmount(testEvents.type);
+    const needsReward = this.testEventNeedsReward(testEvents.type);
+    const needsTier = this.testEventNeedsTier(testEvents.type);
+
+    const amountPlaceholder =
+      testEvents.type === 'bits'
+        ? i18n.t('testEvents.amountBitsPlaceholder')
+        : i18n.t('testEvents.amountGiftPlaceholder');
+
+    const rewardField = needsReward
+      ? `
+          <label class="field field--compact">
+            <span>${i18n.t('testEvents.reward')}</span>
+            <select name="test-event-reward">
               <option value="">${i18n.t('testEvents.rewardPlaceholder')}</option>
             </select>
           </label>
-          <fieldset class="field-group" ${disabled ? 'disabled' : ''}>
-            <legend>${i18n.t('bindings.bits')}</legend>
-            <label class="field field--inline">
-              <input type="radio" name="bits-mode" value="exact" ${bitsExactChecked ? 'checked' : ''} />
-              <span>${i18n.t('testEvents.bitsExact')}</span>
-              <input type="number" name="bits-exact" value="${testEvents.bits.exact ?? ''}" ${bitsExactChecked ? '' : 'disabled'} />
-            </label>
-            <label class="field field--inline">
-              <input type="radio" name="bits-mode" value="range" ${bitsExactChecked ? '' : 'checked'} />
-              <span>${i18n.t('testEvents.bitsRange')}</span>
-              <input type="number" name="bits-min" placeholder="${i18n.t('testEvents.min')}" value="${testEvents.bits.min ?? ''}" ${bitsExactChecked ? 'disabled' : ''} />
-              <input type="number" name="bits-max" placeholder="${i18n.t('testEvents.max')}" value="${testEvents.bits.max ?? ''}" ${bitsExactChecked ? 'disabled' : ''} />
-            </label>
-          </fieldset>
-          <fieldset class="field-group" ${disabled ? 'disabled' : ''}>
-            <legend>${i18n.t('bindings.giftSub')}</legend>
-            <label class="field field--inline">
-              <input type="radio" name="gift-mode" value="exact" ${giftExactChecked ? 'checked' : ''} />
-              <span>${i18n.t('testEvents.giftExact')}</span>
-              <input type="number" name="gift-exact" value="${testEvents.giftSubs.exact ?? ''}" ${giftExactChecked ? '' : 'disabled'} />
-            </label>
-            <label class="field field--inline">
-              <input type="radio" name="gift-mode" value="range" ${giftExactChecked ? '' : 'checked'} />
-              <span>${i18n.t('testEvents.giftRange')}</span>
-              <input type="number" name="gift-min" placeholder="${i18n.t('testEvents.min')}" value="${testEvents.giftSubs.min ?? ''}" ${giftExactChecked ? 'disabled' : ''} />
-              <input type="number" name="gift-max" placeholder="${i18n.t('testEvents.max')}" value="${testEvents.giftSubs.max ?? ''}" ${giftExactChecked ? 'disabled' : ''} />
-            </label>
-          </fieldset>
-          <fieldset class="field-group" ${disabled ? 'disabled' : ''}>
-            <legend>${i18n.t('bindings.sub')}</legend>
-            <label class="field field--inline">
-              <input type="checkbox" value="tier1" ${subTiers.includes('tier1') ? 'checked' : ''} />
-              <span>${i18n.t('testEvents.tier1')}</span>
-            </label>
-            <label class="field field--inline">
-              <input type="checkbox" value="tier2" ${subTiers.includes('tier2') ? 'checked' : ''} />
-              <span>${i18n.t('testEvents.tier2')}</span>
-            </label>
-            <label class="field field--inline">
-              <input type="checkbox" value="tier3" ${subTiers.includes('tier3') ? 'checked' : ''} />
-              <span>${i18n.t('testEvents.tier3')}</span>
-            </label>
-          </fieldset>
+        `
+      : '';
+
+    const amountField = needsAmount
+      ? `
+          <label class="field field--compact">
+            <span>${i18n.t('testEvents.amount')}</span>
+            <input
+              type="number"
+              name="test-event-amount"
+              value="${testEvents.amount}"
+              min="0"
+              placeholder="${amountPlaceholder}"
+            />
+          </label>
+        `
+      : '';
+
+    const tierField = needsTier
+      ? `
+          <label class="field field--compact">
+            <span>${i18n.t('testEvents.subTier')}</span>
+            <select name="test-event-tier">
+              <option value="tier1" ${testEvents.subTier === 'tier1' ? 'selected' : ''}>${i18n.t('bindings.subTier1')}</option>
+              <option value="tier2" ${testEvents.subTier === 'tier2' ? 'selected' : ''}>${i18n.t('bindings.subTier2')}</option>
+              <option value="tier3" ${testEvents.subTier === 'tier3' ? 'selected' : ''}>${i18n.t('bindings.subTier3')}</option>
+            </select>
+          </label>
+        `
+      : '';
+
+    return `
+      <section class="test-events" aria-label="${i18n.t('testEvents.title')}">
+        <div class="test-events__header">
+          <h2 class="test-events__title">${i18n.t('testEvents.title')}</h2>
         </div>
-        <button class="btn btn--primary" data-action="fire-test" ${disabled ? 'disabled' : ''}>${i18n.t('testEvents.fire')}</button>
+        <form class="test-events__form" data-role="test-events-form">
+          <label class="field field--compact">
+            <span>${i18n.t('testEvents.eventType')}</span>
+            <select name="test-event-type">
+              <option value="channel_points" ${testEvents.type === 'channel_points' ? 'selected' : ''}>${i18n.t('bindings.channelPoints')}</option>
+              <option value="bits" ${testEvents.type === 'bits' ? 'selected' : ''}>${i18n.t('bindings.bits')}</option>
+              <option value="gift_sub" ${testEvents.type === 'gift_sub' ? 'selected' : ''}>${i18n.t('bindings.giftSub')}</option>
+              <option value="sub" ${testEvents.type === 'sub' ? 'selected' : ''}>${i18n.t('bindings.sub')}</option>
+              <option value="follow" ${testEvents.type === 'follow' ? 'selected' : ''}>${i18n.t('bindings.follow')}</option>
+            </select>
+          </label>
+          <label class="field field--compact">
+            <span>${i18n.t('testEvents.username')}</span>
+            <input
+              type="text"
+              name="test-event-username"
+              value="${testEvents.username}"
+              placeholder="${i18n.t('testEvents.usernamePlaceholder')}"
+            />
+          </label>
+          ${rewardField}
+          ${amountField}
+          ${tierField}
+          <div class="test-events__action">
+            <button type="submit" class="btn btn--primary" data-action="fire-test">${i18n.t('testEvents.fire')}</button>
+          </div>
+        </form>
       </section>
     `;
   }
 
-  private renderBindingsEntry(): string {
+  private renderBindingsEntry(connected: boolean): string {
+    const disabled = !connected;
     return `
-      <button class="bindings-entry" data-action="open-bindings">
-        <span>${i18n.t('nav.bindings')}</span>
+      <button
+        class="bindings-entry ${disabled ? 'bindings-entry--disabled' : ''}"
+        data-action="open-bindings"
+        ${disabled ? 'disabled aria-disabled="true"' : ''}
+      >
+        <span class="bindings-entry__label-group">
+          <span class="bindings-entry__title">${i18n.t('nav.bindings')}</span>
+          ${
+            disabled
+              ? `<span class="bindings-entry__hint">${i18n.t('bindings.connectHint')}</span>`
+              : ''
+          }
+        </span>
         <span class="bindings-entry__chevron">›</span>
       </button>
     `;
@@ -743,12 +959,6 @@ class PopupApp {
       return '';
     }
     const isEditing = Boolean(this.bindingDraft.id);
-    const amountHint =
-      this.bindingDraft.action === 'pitch'
-        ? i18n.t('bindings.amountHintPitch')
-        : this.bindingDraft.action === 'speed'
-        ? i18n.t('bindings.amountHintSpeed')
-        : '';
 
     return `
       <div class="popup">
@@ -759,13 +969,13 @@ class PopupApp {
         </header>
         <main class="popup__content popup__content--form">
           <label class="field">
-            <span>${i18n.t('bindings.label')}</span>
-            <input type="text" name="label" value="${this.bindingDraft.label}" />
+            <span class="field__label">${i18n.t('bindings.label')}</span>
+            <input type="text" name="label" value="${this.bindingDraft.label}" autocomplete="off" />
           </label>
           <label class="field">
-            <span>${i18n.t('bindings.eventType')}</span>
-            <select name="eventType" value="${this.bindingDraft.eventType}">
-              <option value="">--</option>
+            <span class="field__label">${i18n.t('bindings.eventType')}</span>
+            <select name="eventType">
+              <option value="">${i18n.t('bindings.eventTypePlaceholder')}</option>
               <option value="channel_points" ${this.bindingDraft.eventType === 'channel_points' ? 'selected' : ''}>${i18n.t('bindings.channelPoints')}</option>
               <option value="bits" ${this.bindingDraft.eventType === 'bits' ? 'selected' : ''}>${i18n.t('bindings.bits')}</option>
               <option value="gift_sub" ${this.bindingDraft.eventType === 'gift_sub' ? 'selected' : ''}>${i18n.t('bindings.giftSub')}</option>
@@ -775,33 +985,51 @@ class PopupApp {
           </label>
           ${this.renderBindingConditionalFields()}
           <label class="field">
-            <span>${i18n.t('bindings.action')}</span>
-            <select name="action" value="${this.bindingDraft.action}">
-              <option value="">--</option>
+            <span class="field__label">${i18n.t('bindings.action')}</span>
+            <select name="action">
+              <option value="">${i18n.t('bindings.actionPlaceholder')}</option>
               <option value="pitch" ${this.bindingDraft.action === 'pitch' ? 'selected' : ''}>${i18n.t('bindings.actionPitch')}</option>
               <option value="speed" ${this.bindingDraft.action === 'speed' ? 'selected' : ''}>${i18n.t('bindings.actionSpeed')}</option>
             </select>
           </label>
           <label class="field">
-            <span>${i18n.t('bindings.amount')}</span>
-            <input type="number" name="amount" value="${this.bindingDraft.amount}" placeholder="${amountHint}" />
-          </label>
-          <label class="field field--with-tooltip">
-            <span>${i18n.t('bindings.delay')}</span>
-            <input type="number" min="0" name="delaySeconds" value="${this.bindingDraft.delaySeconds}" />
-            <span class="tooltip" title="${i18n.t('bindings.delayHint')}">?</span>
-          </label>
-          <label class="field field--with-tooltip">
-            <span>${i18n.t('bindings.duration')}</span>
-            <input type="number" min="0" name="durationSeconds" value="${this.bindingDraft.durationSeconds}" />
-            <span class="tooltip" title="${i18n.t('bindings.durationHint')}">?</span>
+            <span class="field__label">${i18n.t('bindings.amount')}</span>
+            <input type="number" name="amount" value="${this.bindingDraft.amount}" />
           </label>
           <div class="field field--stacked">
-            <label>${i18n.t('bindings.chatTemplate')}</label>
-            <div class="chat-template">
-              <button class="btn btn--secondary" type="button" data-action="insert-user">${i18n.t('bindings.insertUser')}</button>
-              <textarea name="chatTemplate" rows="3">${this.bindingDraft.chatTemplate}</textarea>
+            <div class="field__label-row">
+              <span class="field__label">${i18n.t('bindings.delay')}</span>
+              <button
+                type="button"
+                class="info-icon"
+                title="${i18n.t('bindings.delayHint')}"
+                aria-label="${i18n.t('bindings.delayHint')}"
+              >
+                ?
+              </button>
             </div>
+            <input type="number" min="0" name="delaySeconds" value="${this.bindingDraft.delaySeconds}" />
+          </div>
+          <div class="field field--stacked">
+            <div class="field__label-row">
+              <span class="field__label">${i18n.t('bindings.duration')}</span>
+              <button
+                type="button"
+                class="info-icon"
+                title="${i18n.t('bindings.durationHint')}"
+                aria-label="${i18n.t('bindings.durationHint')}"
+              >
+                ?
+              </button>
+            </div>
+            <input type="number" min="0" name="durationSeconds" value="${this.bindingDraft.durationSeconds}" />
+          </div>
+          <div class="field field--stacked">
+            <div class="field__label-row">
+              <span class="field__label">${i18n.t('bindings.chatTemplate')}</span>
+              <button class="link-button" type="button" data-action="insert-user">${i18n.t('bindings.insertUser')}</button>
+            </div>
+            <textarea name="chatTemplate" rows="3">${this.bindingDraft.chatTemplate}</textarea>
           </div>
           <button class="btn btn--primary" data-action="save-binding" ${this.bindingDraftIsValid() ? '' : 'disabled'}>
             ${i18n.t('bindings.save')}
@@ -818,7 +1046,7 @@ class PopupApp {
       case 'channel_points':
         return `
           <label class="field">
-            <span>${i18n.t('bindings.channelPoints')}</span>
+            <span class="field__label">${i18n.t('bindings.channelPoints')}</span>
             <select name="channelReward" disabled>
               <option value="">${i18n.t('bindings.rewardsPlaceholder')}</option>
             </select>
@@ -830,14 +1058,14 @@ class PopupApp {
             <legend>${i18n.t('bindings.bits')}</legend>
             <label class="field field--inline">
               <input type="radio" name="bitsMode" value="exact" ${this.bindingDraft.bitsMode === 'exact' ? 'checked' : ''} />
-              <span>${i18n.t('bindings.modeExact')}</span>
-              <input type="number" name="bitsExact" value="${this.bindingDraft.bitsExact}" ${this.bindingDraft.bitsMode === 'exact' ? '' : 'disabled'} />
+              <span class="field__label">${i18n.t('bindings.modeExact')}</span>
+              <input class="field__inline-input" type="number" name="bitsExact" value="${this.bindingDraft.bitsExact}" ${this.bindingDraft.bitsMode === 'exact' ? '' : 'disabled'} />
             </label>
             <label class="field field--inline">
               <input type="radio" name="bitsMode" value="range" ${this.bindingDraft.bitsMode === 'range' ? 'checked' : ''} />
-              <span>${i18n.t('bindings.modeRange')}</span>
-              <input type="number" name="bitsMin" placeholder="${i18n.t('bindings.rangeMin')}" value="${this.bindingDraft.bitsMin}" ${this.bindingDraft.bitsMode === 'range' ? '' : 'disabled'} />
-              <input type="number" name="bitsMax" placeholder="${i18n.t('bindings.rangeMax')}" value="${this.bindingDraft.bitsMax}" ${this.bindingDraft.bitsMode === 'range' ? '' : 'disabled'} />
+              <span class="field__label">${i18n.t('bindings.modeRange')}</span>
+              <input class="field__inline-input" type="number" name="bitsMin" placeholder="${i18n.t('bindings.rangeMin')}" value="${this.bindingDraft.bitsMin}" ${this.bindingDraft.bitsMode === 'range' ? '' : 'disabled'} />
+              <input class="field__inline-input" type="number" name="bitsMax" placeholder="${i18n.t('bindings.rangeMax')}" value="${this.bindingDraft.bitsMax}" ${this.bindingDraft.bitsMode === 'range' ? '' : 'disabled'} />
             </label>
           </fieldset>
         `;
@@ -847,14 +1075,14 @@ class PopupApp {
             <legend>${i18n.t('bindings.giftSub')}</legend>
             <label class="field field--inline">
               <input type="radio" name="giftMode" value="exact" ${this.bindingDraft.giftMode === 'exact' ? 'checked' : ''} />
-              <span>${i18n.t('bindings.modeExact')}</span>
-              <input type="number" name="giftExact" value="${this.bindingDraft.giftExact}" ${this.bindingDraft.giftMode === 'exact' ? '' : 'disabled'} />
+              <span class="field__label">${i18n.t('bindings.modeExact')}</span>
+              <input class="field__inline-input" type="number" name="giftExact" value="${this.bindingDraft.giftExact}" ${this.bindingDraft.giftMode === 'exact' ? '' : 'disabled'} />
             </label>
             <label class="field field--inline">
               <input type="radio" name="giftMode" value="range" ${this.bindingDraft.giftMode === 'range' ? 'checked' : ''} />
-              <span>${i18n.t('bindings.modeRange')}</span>
-              <input type="number" name="giftMin" placeholder="${i18n.t('bindings.rangeMin')}" value="${this.bindingDraft.giftMin}" ${this.bindingDraft.giftMode === 'range' ? '' : 'disabled'} />
-              <input type="number" name="giftMax" placeholder="${i18n.t('bindings.rangeMax')}" value="${this.bindingDraft.giftMax}" ${this.bindingDraft.giftMode === 'range' ? '' : 'disabled'} />
+              <span class="field__label">${i18n.t('bindings.modeRange')}</span>
+              <input class="field__inline-input" type="number" name="giftMin" placeholder="${i18n.t('bindings.rangeMin')}" value="${this.bindingDraft.giftMin}" ${this.bindingDraft.giftMode === 'range' ? '' : 'disabled'} />
+              <input class="field__inline-input" type="number" name="giftMax" placeholder="${i18n.t('bindings.rangeMax')}" value="${this.bindingDraft.giftMax}" ${this.bindingDraft.giftMode === 'range' ? '' : 'disabled'} />
             </label>
           </fieldset>
         `;
@@ -864,15 +1092,15 @@ class PopupApp {
             <legend>${i18n.t('bindings.sub')}</legend>
             <label class="field field--inline">
               <input type="checkbox" name="subTier" value="tier1" ${this.bindingDraft.subTiers.includes('tier1') ? 'checked' : ''} />
-              <span>${i18n.t('bindings.subTier1')}</span>
+              <span class="field__label">${i18n.t('bindings.subTier1')}</span>
             </label>
             <label class="field field--inline">
               <input type="checkbox" name="subTier" value="tier2" ${this.bindingDraft.subTiers.includes('tier2') ? 'checked' : ''} />
-              <span>${i18n.t('bindings.subTier2')}</span>
+              <span class="field__label">${i18n.t('bindings.subTier2')}</span>
             </label>
             <label class="field field--inline">
               <input type="checkbox" name="subTier" value="tier3" ${this.bindingDraft.subTiers.includes('tier3') ? 'checked' : ''} />
-              <span>${i18n.t('bindings.subTier3')}</span>
+              <span class="field__label">${i18n.t('bindings.subTier3')}</span>
             </label>
           </fieldset>
         `;
@@ -913,7 +1141,7 @@ class PopupApp {
     const languageButtons = Array.from(this.root.querySelectorAll<HTMLButtonElement>('.language-menu .menu-item'));
     const twitchButton = this.root.querySelector<HTMLButtonElement>('[data-action="twitch-button"]');
     const captureToggle = this.root.querySelector<HTMLInputElement>('[data-role="capture-toggle"]');
-    const fireTest = this.root.querySelector<HTMLButtonElement>('[data-action="fire-test"]');
+    const testForm = this.root.querySelector<HTMLFormElement>('[data-role="test-events-form"]');
     const openBindings = this.root.querySelector<HTMLButtonElement>('[data-action="open-bindings"]');
     const diagnosticsToggle = this.root.querySelector<HTMLButtonElement>('[data-action="toggle-diagnostics"]');
 
@@ -928,8 +1156,8 @@ class PopupApp {
     transposeDec?.addEventListener('click', () => this.adjustSemitone(-1));
     transposeInc?.addEventListener('click', () => this.adjustSemitone(1));
     transposeReset?.addEventListener('click', () => this.resetTranspose());
-    speedDec?.addEventListener('click', () => this.adjustSpeed(-5));
-    speedInc?.addEventListener('click', () => this.adjustSpeed(5));
+    speedDec?.addEventListener('click', () => this.adjustSpeed(-1));
+    speedInc?.addEventListener('click', () => this.adjustSpeed(1));
     speedReset?.addEventListener('click', () => this.resetSpeed());
     languageToggle?.addEventListener('click', () => this.toggleLanguageMenu());
     languageButtons.forEach((button) =>
@@ -943,109 +1171,59 @@ class PopupApp {
       const checked = (event.target as HTMLInputElement).checked;
       this.toggleCaptureEvents(checked);
     });
-
-    const testSection = this.root.querySelector<HTMLElement>('.test-events');
-    if (testSection && !testSection.classList.contains('panel--disabled')) {
-      this.bindTestEvents(testSection);
+    if (testForm) {
+      this.bindTestEvents(testForm);
     }
 
-    fireTest?.addEventListener('click', () => this.handleFireTest());
-    openBindings?.addEventListener('click', () => this.openBindingsList());
+    if (openBindings && !openBindings.disabled) {
+      openBindings.addEventListener('click', () => this.openBindingsList());
+    }
     diagnosticsToggle?.addEventListener('click', () => this.toggleDiagnostics());
   }
 
-  private bindTestEvents(container: HTMLElement): void {
-    const channelSelect = container.querySelector<HTMLSelectElement>('select[name="test-channel-points"]');
-    const bitsModeInputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[name="bits-mode"]'));
-    const bitsExact = container.querySelector<HTMLInputElement>('input[name="bits-exact"]');
-    const bitsMin = container.querySelector<HTMLInputElement>('input[name="bits-min"]');
-    const bitsMax = container.querySelector<HTMLInputElement>('input[name="bits-max"]');
-    const giftModeInputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[name="gift-mode"]'));
-    const giftExact = container.querySelector<HTMLInputElement>('input[name="gift-exact"]');
-    const giftMin = container.querySelector<HTMLInputElement>('input[name="gift-min"]');
-    const giftMax = container.querySelector<HTMLInputElement>('input[name="gift-max"]');
-    const subTierInputs = Array.from(container.querySelectorAll<HTMLInputElement>('input[type="checkbox"][value^="tier"]'));
+  private bindTestEvents(form: HTMLFormElement): void {
+    const typeSelect = form.querySelector<HTMLSelectElement>('select[name="test-event-type"]');
+    const usernameInput = form.querySelector<HTMLInputElement>('input[name="test-event-username"]');
+    const rewardSelect = form.querySelector<HTMLSelectElement>('select[name="test-event-reward"]');
+    const amountInput = form.querySelector<HTMLInputElement>('input[name="test-event-amount"]');
+    const tierSelect = form.querySelector<HTMLSelectElement>('select[name="test-event-tier"]');
 
-    channelSelect?.addEventListener('change', (event) => {
+    typeSelect?.addEventListener('change', (event) => {
+      const type = (event.target as HTMLSelectElement).value as TestEventType;
+      const update: Partial<PopupPersistentState['testEvents']> = { type };
+      if (!this.testEventNeedsAmount(type)) {
+        update.amount = '';
+      }
+      if (!this.testEventNeedsReward(type)) {
+        update.channelPointsRewardId = null;
+      }
+      if (!this.testEventNeedsTier(type)) {
+        update.subTier = 'tier1';
+      }
+      this.updateTestEvents(update, { rerender: true });
+    });
+
+    usernameInput?.addEventListener('input', (event) => {
+      this.updateTestEvents({ username: (event.target as HTMLInputElement).value });
+    });
+
+    rewardSelect?.addEventListener('change', (event) => {
       const value = (event.target as HTMLSelectElement).value || null;
-      this.updateTestEvents((state) => ({ ...state, channelPointsRewardId: value }));
+      this.updateTestEvents({ channelPointsRewardId: value });
     });
 
-    bitsModeInputs.forEach((input) =>
-      input.addEventListener('change', (event) => {
-        const mode = (event.target as HTMLInputElement).value as 'exact' | 'range';
-        this.updateTestEvents((state) => ({ ...state, bits: { ...state.bits, mode } }));
-      })
-    );
-
-    bitsExact?.addEventListener('input', (event) => {
-      const value = (event.target as HTMLInputElement).value;
-      this.updateTestEvents((state) => ({
-        ...state,
-        bits: { ...state.bits, exact: value ? Number.parseFloat(value) : null }
-      }));
+    amountInput?.addEventListener('input', (event) => {
+      this.updateTestEvents({ amount: (event.target as HTMLInputElement).value });
     });
 
-    bitsMin?.addEventListener('input', (event) => {
-      const value = (event.target as HTMLInputElement).value;
-      this.updateTestEvents((state) => ({
-        ...state,
-        bits: { ...state.bits, min: value ? Number.parseFloat(value) : null }
-      }));
+    tierSelect?.addEventListener('change', (event) => {
+      this.updateTestEvents({ subTier: (event.target as HTMLSelectElement).value as SubTier });
     });
 
-    bitsMax?.addEventListener('input', (event) => {
-      const value = (event.target as HTMLInputElement).value;
-      this.updateTestEvents((state) => ({
-        ...state,
-        bits: { ...state.bits, max: value ? Number.parseFloat(value) : null }
-      }));
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      this.handleFireTest();
     });
-
-    giftModeInputs.forEach((input) =>
-      input.addEventListener('change', (event) => {
-        const mode = (event.target as HTMLInputElement).value as 'exact' | 'range';
-        this.updateTestEvents((state) => ({ ...state, giftSubs: { ...state.giftSubs, mode } }));
-      })
-    );
-
-    giftExact?.addEventListener('input', (event) => {
-      const value = (event.target as HTMLInputElement).value;
-      this.updateTestEvents((state) => ({
-        ...state,
-        giftSubs: { ...state.giftSubs, exact: value ? Number.parseFloat(value) : null }
-      }));
-    });
-
-    giftMin?.addEventListener('input', (event) => {
-      const value = (event.target as HTMLInputElement).value;
-      this.updateTestEvents((state) => ({
-        ...state,
-        giftSubs: { ...state.giftSubs, min: value ? Number.parseFloat(value) : null }
-      }));
-    });
-
-    giftMax?.addEventListener('input', (event) => {
-      const value = (event.target as HTMLInputElement).value;
-      this.updateTestEvents((state) => ({
-        ...state,
-        giftSubs: { ...state.giftSubs, max: value ? Number.parseFloat(value) : null }
-      }));
-    });
-
-    subTierInputs.forEach((input) =>
-      input.addEventListener('change', (event) => {
-        const checkbox = event.target as HTMLInputElement;
-        const tier = checkbox.value as SubTier;
-        this.updateTestEvents((state) => {
-          const set = new Set(state.subTiers);
-          if (checkbox.checked) set.add(tier);
-          else set.delete(tier);
-          const next = Array.from(set);
-          return { ...state, subTiers: next.length > 0 ? next : [] };
-        });
-      })
-    );
   }
 
   private bindBindingsListEvents(): void {
@@ -1107,11 +1285,20 @@ class PopupApp {
     );
 
     form.querySelectorAll<HTMLSelectElement>('select[name="eventType"]').forEach((select) =>
-      select.addEventListener('change', (event) => this.updateBindingDraft({ eventType: (event.target as HTMLSelectElement).value as BindingEventType | '' }))
+      select.addEventListener('change', (event) => {
+        const value = (event.target as HTMLSelectElement).value as BindingEventType | '';
+        const update: Partial<BindingDraft> = { eventType: value };
+        if (value === 'sub' && this.bindingDraft && this.bindingDraft.subTiers.length === 0) {
+          update.subTiers = ['tier1'];
+        }
+        this.updateBindingDraft(update, { rerender: true });
+      })
     );
 
     form.querySelectorAll<HTMLInputElement>('input[name="bitsMode"]').forEach((input) =>
-      input.addEventListener('change', (event) => this.updateBindingDraft({ bitsMode: (event.target as HTMLInputElement).value as 'exact' | 'range' }))
+      input.addEventListener('change', (event) =>
+        this.updateBindingDraft({ bitsMode: (event.target as HTMLInputElement).value as 'exact' | 'range' }, { rerender: true })
+      )
     );
 
     form.querySelectorAll<HTMLInputElement>('input[name="bitsExact"]').forEach((input) =>
@@ -1125,7 +1312,9 @@ class PopupApp {
     );
 
     form.querySelectorAll<HTMLInputElement>('input[name="giftMode"]').forEach((input) =>
-      input.addEventListener('change', (event) => this.updateBindingDraft({ giftMode: (event.target as HTMLInputElement).value as 'exact' | 'range' }))
+      input.addEventListener('change', (event) =>
+        this.updateBindingDraft({ giftMode: (event.target as HTMLInputElement).value as 'exact' | 'range' }, { rerender: true })
+      )
     );
     form.querySelectorAll<HTMLInputElement>('input[name="giftExact"]').forEach((input) =>
       input.addEventListener('input', (event) => this.updateBindingDraft({ giftExact: (event.target as HTMLInputElement).value }))
@@ -1170,6 +1359,8 @@ class PopupApp {
         this.commitBindingDraft();
       }
     });
+
+    this.refreshBindingEditorSaveState();
   }
 }
 

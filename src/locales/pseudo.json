@@ -17,26 +17,43 @@
     "decrement": "-",
     "increment": "+",
     "reset": "Řēśēŧ",
-    "label": "Šēmīŧōņēś"
+    "label": "Šēmīŧōņēś",
+    "unitSingle": "ķēŷ",
+    "unitPlural": "ķēŷś",
+    "decrementLabel": "Ļōŵēŕ śēmīŧōņē",
+    "incrementLabel": "Řàīśē śēmīŧōņē"
   },
   "speed": {
     "title": "Ŝƥēēđ",
-    "label": "Ƥēŕćēņŧ"
+    "label": "Ƥēŕćēņŧ",
+    "reset": "Řēśēŧ",
+    "decrementLabel": "Ŝļōŵ đōŵņ",
+    "incrementLabel": "Ŝƥēēđ ŭƥ"
   },
   "twitch": {
     "statusDisconnected": "Đīśćōņņēćŧēđ",
     "statusConnected": "Ćōņņēćŧēđ àś {displayName}",
+    "statusReconnect": "Řēćōņņēćŧ ŧō Ŧŵīŧćĥ",
     "connect": "Ćōņņēćŧ",
     "reconnect": "Řēćōņņēćŧ",
     "disconnect": "Đīśćōņņēćŧ",
     "captureToggle": "Ćàƥŧŭŕē ēṽēņŧś",
-    "captureTooltip": "Ŵĥēņ ēņàƅļēđ, īņćōṁīņĝ Ŧŵīŧćĥ ēṽēņŧś ŵīļļ ŧŕīĝĝēŕ ƅīņđīņĝś."
+    "captureTooltip": "Ŵĥēņ ōņ, Ŧŵīŧćĥ ēṽēņŧś ŭņŧŗīgĝē ẏōŭŗ ƅīņđīņĝś īņ ŧĥīś ŧàƅ.",
+    "sectionLabel": "Ŧŵīŧćĥ ċōņņēćŧīōņ",
+    "logoAlt": "Ŧŵīŧćĥ ļōĝō"
   },
   "testEvents": {
     "title": "Ŧēśŧ Ĕṽēņŧś",
-    "requiresLogin": "Řēɋŭīŕēś Ŧŵīŧćĥ ļōĝīņ",
+    "requiresLogin": "Ćōņņēćŧ ŵīŧĥ Ŧŵīŧćĥ ŧō śēņđ ŧēśŧ ēṽēņŧś",
     "fire": "Ƒīŕē Ŧēśŧ",
     "rewardPlaceholder": "Ćĥōōśē ŕēŵàŕđ",
+    "eventType": "Ĕṽēņŧ ŧẏƥē",
+    "username": "Ŭśēŕņàṁē",
+    "usernamePlaceholder": "ṽīēŵēŕ123",
+    "amount": "Âṁōŭņŧ",
+    "amountBitsPlaceholder": "500 ƀīŧś",
+    "amountGiftPlaceholder": "5 ĝīƒŧś",
+    "reward": "Řēŵàŕđ",
     "bitsExact": "Ĕẋàćŧ",
     "bitsRange": "Řàņĝē",
     "min": "Mīņ",
@@ -45,7 +62,8 @@
     "giftRange": "Řàņĝē",
     "tier1": "Ŧīēŕ 1",
     "tier2": "Ŧīēŕ 2",
-    "tier3": "Ŧīēŕ 3"
+    "tier3": "Ŧīēŕ 3",
+    "subTier": "Ŧīēŕ"
   },
   "bindings": {
     "empty": "Ňō ƅīņđīņĝś ẏēŧ.",
@@ -56,6 +74,7 @@
     "unsavedConfirmCancel": "Ćàņćēļ",
     "label": "Ľàƅēļ",
     "eventType": "Ĕṽēņŧ ŧẏƥē",
+    "eventTypePlaceholder": "Ćĥōōśē ŧẏƥē",
     "channelPoints": "Ćĥàņņēļ Ƥōīņŧś",
     "bits": "Ɓīŧś",
     "giftSub": "Ĝīƒŧ Ŝŭƅ",
@@ -72,6 +91,7 @@
     "action": "Âćŧīōņ",
     "actionPitch": "Ƥīŧćĥ",
     "actionSpeed": "Ŝƥēēđ",
+    "actionPlaceholder": "Ćĥōōśē àćŧīōņ",
     "amount": "Âṁōŭņŧ",
     "delay": "Đēļàẏ (śēć)",
     "delayHint": "Ŧīṁē ƅēƒōŕē ŧĥē ēƒƒēćŧ àƥƥļīēś.",
@@ -81,12 +101,14 @@
     "insertUser": "Īņśēŕŧ %user%",
     "save": "Ŝàṽē",
     "amountHintPitch": "+2 śēmīŧōņēś",
-    "amountHintSpeed": "+5%"
+    "amountHintSpeed": "+5%",
+    "connectHint": "Ćōņņēćŧ ŧō māņàĝē ƅīņđīņĝś"
   },
   "toasts": {
     "testFired": "Ŧēśŧ ƥàẏļōàđ ļōĝĝēđ ŧō ćōņśōļē.",
     "bindingSaved": "Ɓīņđīņĝ śàṽēđ.",
-    "bindingDeleted": "Ɓīņđīņĝ đēļēŧēđ."
+    "bindingDeleted": "Ɓīņđīņĝ đēļēŧēđ.",
+    "testInvalid": "Ƒīļļ īņ ŧĥē ŕēɋŭīŕēđ ŧēśŧ ēṽēņŧ ƒīēļđś."
   },
   "misc": {
     "language": "Ļàņĝŭàĝē"

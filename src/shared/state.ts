@@ -62,18 +62,14 @@ export interface BindingDefinition {
   chatTemplate: string;
 }
 
-export interface TestEventRangeState {
-  mode: 'exact' | 'range';
-  exact?: number | null;
-  min?: number | null;
-  max?: number | null;
-}
+export type TestEventType = 'channel_points' | 'bits' | 'gift_sub' | 'sub' | 'follow';
 
 export interface TestEventsState {
+  type: TestEventType;
+  username: string;
+  amount: string;
   channelPointsRewardId: string | null;
-  bits: TestEventRangeState;
-  giftSubs: TestEventRangeState;
-  subTiers: SubTier[];
+  subTier: SubTier;
 }
 
 export interface PopupPersistentState {
@@ -99,10 +95,11 @@ export function createDefaultPopupState(): PopupPersistentState {
     loggedIn: false,
     twitchDisplayName: null,
     testEvents: {
+      type: 'channel_points',
+      username: '',
+      amount: '',
       channelPointsRewardId: null,
-      bits: { mode: 'exact', exact: null, min: null, max: null },
-      giftSubs: { mode: 'exact', exact: null, min: null, max: null },
-      subTiers: ['tier1']
+      subTier: 'tier1'
     },
     bindings: [],
     diagnosticsExpanded: false
