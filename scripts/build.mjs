@@ -77,9 +77,31 @@ async function copyLocales() {
   await fs.writeFile(path.join(localesDest, 'index.json'), JSON.stringify(manifest, null, 2));
 }
 
+async function copyChromeLocales() {
+  const chromeLocalesSrc = path.join(srcDir, '_locales');
+  const chromeLocalesDest = path.join(outDir, '_locales');
+  try {
+    const entries = await fs.readdir(chromeLocalesSrc, { withFileTypes: true });
+    await fs.mkdir(chromeLocalesDest, { recursive: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const locale = entry.name;
+      const srcPath = path.join(chromeLocalesSrc, locale, 'messages.json');
+      const destDir = path.join(chromeLocalesDest, locale);
+      await fs.mkdir(destDir, { recursive: true });
+      await fs.copyFile(srcPath, path.join(destDir, 'messages.json'));
+    }
+  } catch (error) {
+    if ((error?.code ?? error?.['code']) === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+}
+
 async function run() {
   await clean();
-  await Promise.all([bundle(), copyStatic(), copyLocales()]);
+  await Promise.all([bundle(), copyStatic(), copyLocales(), copyChromeLocales()]);
 }
 
 run().catch((error) => {

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "Twitch AudioFX",
-  "description": "Twitch EventSub-driven audio controls for active tabs (Phase 1 scaffold)",
+  "name": "__MSG_extensionName__",
+  "description": "__MSG_extensionDescription__",
   "version": "0.1.0",
   "minimum_chrome_version": "116",
   "default_locale": "en",
@@ -12,6 +12,6 @@
   },
   "action": {
     "default_popup": "popup/index.html",
-    "default_title": "Twitch AudioFX"
+    "default_title": "__MSG_extensionDefaultTitle__"
   }
 }
