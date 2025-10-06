@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Twitch AudioFX",
+  "description": "Twitch EventSub-driven audio controls for active tabs (Phase 1 scaffold)",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "default_locale": "en",
+  "permissions": ["identity", "storage", "scripting", "activeTab"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "Twitch AudioFX"
+  }
+}

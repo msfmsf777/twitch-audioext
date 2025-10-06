@@ -1,0 +1,94 @@
+{
+  "_meta": { "name": "English" },
+  "app": {
+    "title": "Twitch AudioFX",
+    "diagnostics": "Diagnostics",
+    "diagnosticsToggle": "Show diagnostics"
+  },
+  "nav": {
+    "back": "Back",
+    "bindings": "Bindings",
+    "addBinding": "Add",
+    "editBinding": "Edit Binding",
+    "newBinding": "New Binding"
+  },
+  "transpose": {
+    "title": "Transpose",
+    "decrement": "-",
+    "increment": "+",
+    "reset": "Reset",
+    "label": "Semitones"
+  },
+  "speed": {
+    "title": "Speed",
+    "label": "Percent"
+  },
+  "twitch": {
+    "statusDisconnected": "Disconnected",
+    "statusConnected": "Connected as {displayName}",
+    "connect": "Connect",
+    "reconnect": "Reconnect",
+    "disconnect": "Disconnect",
+    "captureToggle": "Capture events",
+    "captureTooltip": "When enabled, incoming Twitch events will trigger bindings."
+  },
+  "testEvents": {
+    "title": "Test Events",
+    "requiresLogin": "Requires Twitch login",
+    "fire": "Fire Test",
+    "rewardPlaceholder": "Choose reward",
+    "bitsExact": "Exact",
+    "bitsRange": "Range",
+    "min": "Min",
+    "max": "Max",
+    "giftExact": "Exact",
+    "giftRange": "Range",
+    "tier1": "Tier 1",
+    "tier2": "Tier 2",
+    "tier3": "Tier 3"
+  },
+  "bindings": {
+    "empty": "No bindings yet.",
+    "toggleLabel": "Enabled",
+    "delete": "Delete",
+    "unsavedConfirm": "Leave without saving?",
+    "unsavedConfirmLeave": "Leave",
+    "unsavedConfirmCancel": "Cancel",
+    "label": "Label",
+    "eventType": "Event type",
+    "channelPoints": "Channel Points",
+    "bits": "Bits",
+    "giftSub": "Gift Sub",
+    "sub": "Sub",
+    "follow": "New Follow",
+    "rewardsPlaceholder": "(rewards will appear after login)",
+    "modeExact": "Exact",
+    "modeRange": "Range",
+    "rangeMin": "Min",
+    "rangeMax": "Max",
+    "subTier1": "Tier 1",
+    "subTier2": "Tier 2",
+    "subTier3": "Tier 3",
+    "action": "Action",
+    "actionPitch": "Pitch",
+    "actionSpeed": "Speed",
+    "amount": "Amount",
+    "delay": "Delay (sec)",
+    "delayHint": "Time before the effect applies.",
+    "duration": "Duration (sec)",
+    "durationHint": "How long before the effect resets. Leave blank to persist.",
+    "chatTemplate": "Chat message template",
+    "insertUser": "Insert %user%",
+    "save": "Save",
+    "amountHintPitch": "+2 semitones",
+    "amountHintSpeed": "+5%"
+  },
+  "toasts": {
+    "testFired": "Test payload logged to console.",
+    "bindingSaved": "Binding saved.",
+    "bindingDeleted": "Binding deleted."
+  },
+  "misc": {
+    "language": "Language"
+  }
+}
