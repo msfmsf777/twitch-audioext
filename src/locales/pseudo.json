@@ -1,0 +1,94 @@
+{
+  "_meta": { "name": "Pseudo" },
+  "app": {
+    "title": "Ŧŵīŧćĥ ÂŭđīōƑẋ",
+    "diagnostics": "Đīàĝņōśŧīćś",
+    "diagnosticsToggle": "Ŝĥōŵ đīàĝņōśŧīćś"
+  },
+  "nav": {
+    "back": "Ɓàćķ",
+    "bindings": "Ɓīņđīņĝś",
+    "addBinding": "Âđđ",
+    "editBinding": "Ĕđīŧ Ɓīņđīņĝ",
+    "newBinding": "Ňēŵ Ɓīņđīņĝ"
+  },
+  "transpose": {
+    "title": "Ŧŕàņśƥōśē",
+    "decrement": "-",
+    "increment": "+",
+    "reset": "Řēśēŧ",
+    "label": "Šēmīŧōņēś"
+  },
+  "speed": {
+    "title": "Ŝƥēēđ",
+    "label": "Ƥēŕćēņŧ"
+  },
+  "twitch": {
+    "statusDisconnected": "Đīśćōņņēćŧēđ",
+    "statusConnected": "Ćōņņēćŧēđ àś {displayName}",
+    "connect": "Ćōņņēćŧ",
+    "reconnect": "Řēćōņņēćŧ",
+    "disconnect": "Đīśćōņņēćŧ",
+    "captureToggle": "Ćàƥŧŭŕē ēṽēņŧś",
+    "captureTooltip": "Ŵĥēņ ēņàƅļēđ, īņćōṁīņĝ Ŧŵīŧćĥ ēṽēņŧś ŵīļļ ŧŕīĝĝēŕ ƅīņđīņĝś."
+  },
+  "testEvents": {
+    "title": "Ŧēśŧ Ĕṽēņŧś",
+    "requiresLogin": "Řēɋŭīŕēś Ŧŵīŧćĥ ļōĝīņ",
+    "fire": "Ƒīŕē Ŧēśŧ",
+    "rewardPlaceholder": "Ćĥōōśē ŕēŵàŕđ",
+    "bitsExact": "Ĕẋàćŧ",
+    "bitsRange": "Řàņĝē",
+    "min": "Mīņ",
+    "max": "Màẋ",
+    "giftExact": "Ĕẋàćŧ",
+    "giftRange": "Řàņĝē",
+    "tier1": "Ŧīēŕ 1",
+    "tier2": "Ŧīēŕ 2",
+    "tier3": "Ŧīēŕ 3"
+  },
+  "bindings": {
+    "empty": "Ňō ƅīņđīņĝś ẏēŧ.",
+    "toggleLabel": "Ĕņàƅļēđ",
+    "delete": "Đēļēŧē",
+    "unsavedConfirm": "Ľēàṽē ŵīŧĥōŭŧ śàṽīņĝ?",
+    "unsavedConfirmLeave": "Ľēàṽē",
+    "unsavedConfirmCancel": "Ćàņćēļ",
+    "label": "Ľàƅēļ",
+    "eventType": "Ĕṽēņŧ ŧẏƥē",
+    "channelPoints": "Ćĥàņņēļ Ƥōīņŧś",
+    "bits": "Ɓīŧś",
+    "giftSub": "Ĝīƒŧ Ŝŭƅ",
+    "sub": "Ŝŭƅ",
+    "follow": "Ňēŵ Ƒōļļōŵ",
+    "rewardsPlaceholder": "(ŕēŵàŕđś ŵīļļ àƥƥēàŕ àƒŧēŕ ļōĝīņ)",
+    "modeExact": "Ĕẋàćŧ",
+    "modeRange": "Řàņĝē",
+    "rangeMin": "Mīņ",
+    "rangeMax": "Màẋ",
+    "subTier1": "Ŧīēŕ 1",
+    "subTier2": "Ŧīēŕ 2",
+    "subTier3": "Ŧīēŕ 3",
+    "action": "Âćŧīōņ",
+    "actionPitch": "Ƥīŧćĥ",
+    "actionSpeed": "Ŝƥēēđ",
+    "amount": "Âṁōŭņŧ",
+    "delay": "Đēļàẏ (śēć)",
+    "delayHint": "Ŧīṁē ƅēƒōŕē ŧĥē ēƒƒēćŧ àƥƥļīēś.",
+    "duration": "Đŭŕàŧīōņ (śēć)",
+    "durationHint": "Ĥōŵ ļōņĝ ƅēƒōŕē ŧĥē ēƒƒēćŧ ŕēśēŧś. Ľēàṽē ƅļàņķ ŧō ƥēŕśīśŧ.",
+    "chatTemplate": "Ćĥàŧ mēśśàĝē ŧēṁƥļàŧē",
+    "insertUser": "Īņśēŕŧ %user%",
+    "save": "Ŝàṽē",
+    "amountHintPitch": "+2 śēmīŧōņēś",
+    "amountHintSpeed": "+5%"
+  },
+  "toasts": {
+    "testFired": "Ŧēśŧ ƥàẏļōàđ ļōĝĝēđ ŧō ćōņśōļē.",
+    "bindingSaved": "Ɓīņđīņĝ śàṽēđ.",
+    "bindingDeleted": "Ɓīņđīņĝ đēļēŧēđ."
+  },
+  "misc": {
+    "language": "Ļàņĝŭàĝē"
+  }
+}

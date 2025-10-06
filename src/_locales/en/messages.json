@@ -1,0 +1,11 @@
+{
+  "extensionName": {
+    "message": "Twitch AudioFX"
+  },
+  "extensionDescription": {
+    "message": "Twitch EventSub-driven audio controls for active tabs"
+  },
+  "extensionDefaultTitle": {
+    "message": "Twitch AudioFX"
+  }
+}
