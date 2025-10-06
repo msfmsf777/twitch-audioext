@@ -1,0 +1,20 @@
+{
+  "name": "twitch-audioext",
+  "version": "0.1.0",
+  "description": "Twitch AudioFX MV3 extension scaffold (Phase 1)",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "clean": "rimraf dist"
+  },
+  "keywords": ["twitch", "extension", "audio"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/chrome": "^0.1.22",
+    "@types/webextension-polyfill": "^0.12.4",
+    "esbuild": "^0.25.10",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.9.3"
+  }
+}
