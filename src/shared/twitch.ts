@@ -16,15 +16,17 @@ export const TWITCH_EVENTSUB_WS = 'wss://eventsub.wss.twitch.tv/ws';
 
 export interface TwitchAuthData {
   accessToken: string;
-  expiresAt: number;
-  obtainedAt: number;
+  tokenType: 'bearer';
   scopes: string[];
-  broadcasterId: string;
+  clientId: string;
+  userId: string;
   displayName: string;
-  login: string;
+  obtainedAt: number;
+  expiresIn: number;
 }
 
-export const TWITCH_AUTH_STORAGE_KEY = 'twitchAuth';
+export const TWITCH_AUTH_STORAGE_KEY = 'twitch';
+export const TWITCH_LEGACY_AUTH_STORAGE_KEYS = ['twitchAuth'] as const;
 
 export interface TwitchDiagnosticsSnapshot {
   websocketConnected: boolean;
@@ -34,6 +36,9 @@ export interface TwitchDiagnosticsSnapshot {
   lastNotificationAt: number | null;
   lastNotificationType: string | null;
   lastError: string | null;
+  tokenType: string | null;
+  tokenClientId: string | null;
+  tokenExpiresIn: number | null;
 }
 
 export function createEmptyDiagnostics(): TwitchDiagnosticsSnapshot {
@@ -44,7 +49,10 @@ export function createEmptyDiagnostics(): TwitchDiagnosticsSnapshot {
     lastKeepaliveAt: null,
     lastNotificationAt: null,
     lastNotificationType: null,
-    lastError: null
+    lastError: null,
+    tokenType: null,
+    tokenClientId: null,
+    tokenExpiresIn: null
   };
 }
 
@@ -54,29 +62,29 @@ export interface EventSubSubscriptionDefinition {
   condition: Record<string, string>;
 }
 
-export function getRequiredEventSubDefinitions(broadcasterId: string): EventSubSubscriptionDefinition[] {
+export function getRequiredEventSubDefinitions(userId: string): EventSubSubscriptionDefinition[] {
   return [
     {
       type: 'channel.channel_points_custom_reward_redemption.add',
       version: '1',
-      condition: { broadcaster_user_id: broadcasterId }
+      condition: { broadcaster_user_id: userId }
     },
     {
       type: 'channel.cheer',
       version: '1',
-      condition: { broadcaster_user_id: broadcasterId }
+      condition: { broadcaster_user_id: userId }
     },
     {
       type: 'channel.subscribe',
       version: '1',
-      condition: { broadcaster_user_id: broadcasterId }
+      condition: { broadcaster_user_id: userId }
     },
     {
       type: 'channel.follow',
       version: '2',
       condition: {
-        broadcaster_user_id: broadcasterId,
-        moderator_user_id: broadcasterId
+        broadcaster_user_id: userId,
+        moderator_user_id: userId
       }
     }
   ];

@@ -1208,6 +1208,16 @@ class PopupApp {
     const connected = diag.websocketConnected ? i18n.t('diagnostics.yes') : i18n.t('diagnostics.no');
     const session = diag.sessionId ? diag.sessionId.slice(0, 8) : i18n.t('diagnostics.unknown');
     const subs = diag.subscriptions.toString();
+    const tokenType = diag.tokenType
+      ? diag.tokenType === 'user'
+        ? i18n.t('diagnostics.tokenUser')
+        : diag.tokenType
+      : i18n.t('diagnostics.unknown');
+    const tokenClientId = diag.tokenClientId ?? i18n.t('diagnostics.unknown');
+    const expiresIn =
+      typeof diag.tokenExpiresIn === 'number'
+        ? i18n.t('diagnostics.secondsRemaining', { seconds: diag.tokenExpiresIn })
+        : i18n.t('diagnostics.unknown');
     const keepalive = this.formatDiagnosticsTime(diag.lastKeepaliveAt);
     const lastNotification = this.formatDiagnosticsTime(diag.lastNotificationAt);
     const notificationType = diag.lastNotificationType ?? i18n.t('diagnostics.unknown');
@@ -1218,6 +1228,9 @@ class PopupApp {
         <div><dt>${i18n.t('diagnostics.wsConnected')}</dt><dd>${connected}</dd></div>
         <div><dt>${i18n.t('diagnostics.sessionId')}</dt><dd>${session}</dd></div>
         <div><dt>${i18n.t('diagnostics.subscriptions')}</dt><dd>${subs}</dd></div>
+        <div><dt>${i18n.t('diagnostics.tokenType')}</dt><dd>${tokenType}</dd></div>
+        <div><dt>${i18n.t('diagnostics.tokenClientId')}</dt><dd>${tokenClientId}</dd></div>
+        <div><dt>${i18n.t('diagnostics.tokenExpiresIn')}</dt><dd>${expiresIn}</dd></div>
         <div><dt>${i18n.t('diagnostics.lastKeepalive')}</dt><dd>${keepalive}</dd></div>
         <div><dt>${i18n.t('diagnostics.lastNotification')}</dt><dd>${lastNotification}</dd></div>
         <div><dt>${i18n.t('diagnostics.lastNotificationType')}</dt><dd>${notificationType}</dd></div>
