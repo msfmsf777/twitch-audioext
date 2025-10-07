@@ -663,17 +663,30 @@ input[type='range'] {
   overflow: hidden;
   transition: max-height 0.2s ease;
   background: rgba(255, 255, 255, 0.04);
+  padding: 0 12px;
 }
 
 .diagnostics--open .diagnostics__body {
-  max-height: 200px;
+  max-height: 220px;
+  padding-bottom: 12px;
 }
 
-.diagnostics__body pre {
+.diagnostics__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 12px;
   margin: 0;
-  padding: 12px;
+  padding: 12px 0 0;
   font-size: 11px;
-  white-space: pre-wrap;
+}
+
+.diagnostics__grid dt {
+  font-weight: 600;
+}
+
+.diagnostics__grid dd {
+  margin: 0;
+  word-break: break-word;
 }
 
 .toast-container {

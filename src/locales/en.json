@@ -113,10 +113,31 @@
     "connectHint": "Connect to manage bindings"
   },
   "toasts": {
-    "testFired": "Test payload logged to console.",
+    "testFired": "Test event sent.",
     "bindingSaved": "Binding saved.",
     "bindingDeleted": "Binding deleted.",
-    "testInvalid": "Fill out the required test event fields."
+    "testInvalid": "Fill out the required test event fields.",
+    "captureDisabled": "Enable event capture to process events.",
+    "twitchConnected": "Connected to Twitch.",
+    "twitchReconnected": "Twitch session refreshed.",
+    "twitchDisconnected": "Disconnected from Twitch.",
+    "twitchAuthFailed": "Could not authenticate with Twitch. Try again.",
+    "twitchMissingScopes": "Grant the required scopes: {scopes}.",
+    "twitchMissingClientId": "Set TWITCH_CLIENT_ID before building the extension.",
+    "twitchAuthCancelled": "Twitch sign-in was cancelled."
+  },
+  "diagnostics": {
+    "wsConnected": "WS connected",
+    "sessionId": "Session",
+    "subscriptions": "Subscriptions",
+    "lastKeepalive": "Last keepalive",
+    "lastNotification": "Last notification",
+    "lastNotificationType": "Last type",
+    "lastError": "Last error",
+    "yes": "Yes",
+    "no": "No",
+    "unknown": "—",
+    "none": "None"
   },
   "misc": {
     "language": "Language"

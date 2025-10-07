@@ -30,6 +30,10 @@ async function bundle() {
     logLevel: 'info',
     loader: {
       '.json': 'json'
+    },
+    define: {
+      'process.env.TWITCH_CLIENT_ID': JSON.stringify(process.env.TWITCH_CLIENT_ID ?? ''),
+      'process.env.TWITCH_REDIRECT_PATH': JSON.stringify(process.env.TWITCH_REDIRECT_PATH ?? 'twitch')
     }
   });
 }

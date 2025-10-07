@@ -113,10 +113,31 @@
     "connectHint": "Ćōņņēćŧ ŧō māņàĝē ƅīņđīņĝś"
   },
   "toasts": {
-    "testFired": "Ŧēśŧ ƥàẏļōàđ ļōĝĝēđ ŧō ćōņśōļē.",
+    "testFired": "Ŧēśŧ ēṽēņŧ śēņŧ.",
     "bindingSaved": "Ɓīņđīņĝ śàṽēđ.",
     "bindingDeleted": "Ɓīņđīņĝ đēļēŧēđ.",
-    "testInvalid": "Ƒīļļ īņ ŧĥē ŕēɋŭīŕēđ ŧēśŧ ēṽēņŧ ƒīēļđś."
+    "testInvalid": "Ƒīļļ īņ ŧĥē ŕēɋŭīŕēđ ŧēśŧ ēṽēņŧ ƒīēļđś.",
+    "captureDisabled": "Ȅņàƅļē ēṽēņŧ ćàƥŧŭŕē ŧō ƥŕōċēşş ēṽēņŧś.",
+    "twitchConnected": "Ćōņņēćŧēđ ŧō Ŧŵīŧćĥ.",
+    "twitchReconnected": "Ŧŵīŧćĥ śēśśīōņ ŕēƒŕēşĥēđ.",
+    "twitchDisconnected": "Ḓīśċōņņēćŧēđ ƒŕōṁ Ŧŵīŧćĥ.",
+    "twitchAuthFailed": "Ćōŭļđ ņōŧ àŭŧĥēņŧīċàŧē ŵīŧĥ Ŧŵīŧćĥ. Ŧŕŷ àĝàīņ.",
+    "twitchMissingScopes": "Ɠŕàņŧ ŧĥē ŕēɋŭīŕēđ śċōƥēś: {scopes}.",
+    "twitchMissingClientId": "Ŝēŧ ŦŴȈŦĆĤ_ĆĿĮȄȦŇŦ_ȈḒ ƅēƒōŕē ƅŭīļđīņĝ ŧĥē ēẋŧēņśīōņ.",
+    "twitchAuthCancelled": "Ŧŵīŧćĥ śīĝņ-īņ ŵàś ćàņċēļļēđ."
+  },
+  "diagnostics": {
+    "wsConnected": "ŴŜ ćōņņēćŧēđ",
+    "sessionId": "Ŝēśśīōņ",
+    "subscriptions": "Ŝŭƅśċŕīƥŧīōņś",
+    "lastKeepalive": "Ŀàśŧ ķēēƥàļīṽē",
+    "lastNotification": "Ŀàśŧ ņōŧīƒīċàŧīōņ",
+    "lastNotificationType": "Ŀàśŧ ŧŷƥē",
+    "lastError": "Ŀàśŧ ēŕŕōŕ",
+    "yes": "Ɏēś",
+    "no": "Ƞō",
+    "unknown": "—",
+    "none": "Ƞōņē"
   },
   "misc": {
     "language": "Ļàņĝŭàĝē"
