@@ -5,7 +5,8 @@ export const TWITCH_REDIRECT_PATH = (process.env.TWITCH_REDIRECT_PATH ?? 'twitch
 export const TWITCH_REQUIRED_SCOPES = [
   'channel:read:redemptions',
   'bits:read',
-  'channel:read:subscriptions'
+  'channel:read:subscriptions',
+  'moderator:read:followers'
 ] as const;
 
 export type TwitchScope = (typeof TWITCH_REQUIRED_SCOPES)[number];
@@ -62,29 +63,32 @@ export interface EventSubSubscriptionDefinition {
   condition: Record<string, string>;
 }
 
-export function getRequiredEventSubDefinitions(userId: string): EventSubSubscriptionDefinition[] {
+export function getRequiredEventSubDefinitions(
+  broadcasterUserId: string,
+  moderatorUserId: string
+): EventSubSubscriptionDefinition[] {
   return [
     {
       type: 'channel.channel_points_custom_reward_redemption.add',
       version: '1',
-      condition: { broadcaster_user_id: userId }
+      condition: { broadcaster_user_id: broadcasterUserId }
     },
     {
       type: 'channel.cheer',
       version: '1',
-      condition: { broadcaster_user_id: userId }
+      condition: { broadcaster_user_id: broadcasterUserId }
     },
     {
       type: 'channel.subscribe',
       version: '1',
-      condition: { broadcaster_user_id: userId }
+      condition: { broadcaster_user_id: broadcasterUserId }
     },
     {
       type: 'channel.follow',
       version: '2',
       condition: {
-        broadcaster_user_id: userId,
-        moderator_user_id: userId
+        broadcaster_user_id: broadcasterUserId,
+        moderator_user_id: moderatorUserId
       }
     }
   ];
