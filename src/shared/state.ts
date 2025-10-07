@@ -14,6 +14,11 @@ export interface RangeConfig {
 
 export type SubTier = 'tier1' | 'tier2' | 'tier3';
 
+export interface ChannelPointRewardSummary {
+  id: string;
+  title: string;
+}
+
 export interface BindingAction {
   type: 'pitch' | 'speed';
   amount: number;
@@ -79,6 +84,7 @@ export interface PopupPersistentState {
   captureEvents: boolean;
   loggedIn: boolean;
   twitchDisplayName: string | null;
+  channelPointRewards: ChannelPointRewardSummary[];
   testEvents: TestEventsState;
   bindings: BindingDefinition[];
   diagnosticsExpanded: boolean;
@@ -94,6 +100,7 @@ export function createDefaultPopupState(): PopupPersistentState {
     captureEvents: false,
     loggedIn: false,
     twitchDisplayName: null,
+    channelPointRewards: [],
     testEvents: {
       type: 'channel_points',
       username: '',

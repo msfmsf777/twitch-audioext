@@ -10,7 +10,8 @@ import {
   type PopupPersistentState,
   type BindingEventType,
   type SubTier,
-  type TestEventType
+  type TestEventType,
+  type ChannelPointRewardSummary
 } from '../shared/state';
 import { loadFromStorage, removeFromStorage, saveToStorage } from '../shared/storage';
 import {
@@ -32,9 +33,14 @@ import {
 
 const AUTH_EXPIRY_PADDING_MS = 60_000;
 const INITIAL_BACKOFF_MS = 1_000;
-const MAX_BACKOFF_MS = 60_000;
+const MAX_BACKOFF_MS = 30_000;
+const STATE_BROADCAST_MIN_INTERVAL_MS = 500;
+const SUBSCRIPTION_CREATE_WINDOW_MS = 10_000;
+const CHANNEL_REWARD_REFRESH_INTERVAL_MS = 60_000;
 
 type TimeoutHandle = ReturnType<typeof setTimeout>;
+
+type EventSubConnectionState = 'idle' | 'connecting' | 'ready' | 'reconnecting' | 'closed';
 
 type RoutedEventSource = 'eventsub' | 'test';
 
@@ -98,6 +104,13 @@ class TokenValidationError extends Error {
   }
 }
 
+class HelixRequestError extends Error {
+  constructor(public readonly status: number, public readonly body: unknown, message = 'Helix request failed') {
+    super(message);
+    this.name = 'HelixRequestError';
+  }
+}
+
 let cachedState: PopupPersistentState = createDefaultPopupState();
 let twitchAuth: TwitchAuthData | null = null;
 let diagnostics: TwitchDiagnosticsSnapshot = createEmptyDiagnostics();
@@ -108,6 +121,19 @@ let eventSubReconnectTimer: TimeoutHandle | null = null;
 let keepaliveTimer: TimeoutHandle | null = null;
 let keepaliveTimeoutMs = 0;
 let reconnectBackoffMs = INITIAL_BACKOFF_MS;
+let eventSubConnectionState: EventSubConnectionState = 'idle';
+let ensureSubscriptionsTimer: TimeoutHandle | null = null;
+let subscriptionDeadlineTimer: TimeoutHandle | null = null;
+let subscriptionsReady = false;
+let subscriptionRetryBlocked = false;
+let pendingBroadcastTimer: TimeoutHandle | null = null;
+let lastBroadcastStateSerialized: string | null = null;
+let lastBroadcastAt = 0;
+let channelRewardTimer: TimeoutHandle | null = null;
+let channelRewardLastFetchedAt = 0;
+let ensureSubscriptionsInFlight = false;
+let suppressedCloseSocket: WebSocket | null = null;
+let channelRewardFetchInFlight = false;
 
 function getAuthExpiry(auth: TwitchAuthData): number {
   return auth.obtainedAt + auth.expiresIn * 1000;
@@ -174,7 +200,13 @@ async function migrateLegacyAuthStorage(): Promise<void> {
 
 async function init(): Promise<void> {
   await migrateLegacyAuthStorage();
-  cachedState = await loadFromStorage(POPUP_STATE_STORAGE_KEY, createDefaultPopupState());
+  const storedState = await loadFromStorage(POPUP_STATE_STORAGE_KEY, createDefaultPopupState());
+  const defaults = createDefaultPopupState();
+  cachedState = {
+    ...defaults,
+    ...storedState,
+    testEvents: { ...defaults.testEvents, ...(storedState.testEvents ?? {}) }
+  };
   twitchAuth = await loadFromStorage(TWITCH_AUTH_STORAGE_KEY, null);
   await syncStateWithAuth({ persist: false, broadcast: false });
 
@@ -192,7 +224,13 @@ async function init(): Promise<void> {
 
 void init();
 
-function broadcastState(): void {
+function performStateBroadcast(): void {
+  const serialized = JSON.stringify(cachedState);
+  if (lastBroadcastStateSerialized === serialized) {
+    return;
+  }
+  lastBroadcastStateSerialized = serialized;
+  lastBroadcastAt = Date.now();
   try {
     chrome.runtime.sendMessage({ type: 'BACKGROUND_STATE', state: cachedState }, () => {
       void chrome.runtime.lastError;
@@ -200,6 +238,34 @@ function broadcastState(): void {
   } catch (error) {
     console.debug('[background] Failed to broadcast state', error);
   }
+}
+
+function broadcastState(): void {
+  const serialized = JSON.stringify(cachedState);
+  if (lastBroadcastStateSerialized === serialized && !pendingBroadcastTimer) {
+    return;
+  }
+
+  const now = Date.now();
+  const elapsed = now - lastBroadcastAt;
+  if (elapsed >= STATE_BROADCAST_MIN_INTERVAL_MS) {
+    if (pendingBroadcastTimer) {
+      clearTimeout(pendingBroadcastTimer);
+      pendingBroadcastTimer = null;
+    }
+    performStateBroadcast();
+    return;
+  }
+
+  if (pendingBroadcastTimer) {
+    return;
+  }
+
+  const delay = Math.max(0, STATE_BROADCAST_MIN_INTERVAL_MS - elapsed);
+  pendingBroadcastTimer = setTimeout(() => {
+    pendingBroadcastTimer = null;
+    performStateBroadcast();
+  }, delay);
 }
 
 function pushDiagnostics(): void {
@@ -216,12 +282,72 @@ async function persistCachedState(): Promise<void> {
   await saveToStorage(POPUP_STATE_STORAGE_KEY, cachedState);
 }
 
+function valuesEqual(left: unknown, right: unknown): boolean {
+  if (left === right) {
+    return true;
+  }
+  if (typeof left !== typeof right) {
+    return false;
+  }
+  if (left === null || right === null) {
+    return false;
+  }
+  if (Array.isArray(left)) {
+    if (!Array.isArray(right) || left.length !== right.length) {
+      return false;
+    }
+    for (let index = 0; index < left.length; index += 1) {
+      if (!valuesEqual(left[index], right[index])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (typeof left === 'object') {
+    const leftKeys = Object.keys(left as Record<string, unknown>);
+    const rightKeys = Object.keys(right as Record<string, unknown>);
+    if (leftKeys.length !== rightKeys.length) {
+      return false;
+    }
+    for (const key of leftKeys) {
+      if (!valuesEqual((left as any)[key], (right as any)[key])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
 async function updateCachedState(
   partial: Partial<PopupPersistentState>,
   options: { persist?: boolean; broadcast?: boolean } = {}
 ): Promise<void> {
   const { persist = true, broadcast = true } = options;
-  cachedState = { ...cachedState, ...partial };
+  if (!partial || Object.keys(partial).length === 0) {
+    return;
+  }
+
+  let changed = false;
+  const next: PopupPersistentState = { ...cachedState };
+  for (const [key, value] of Object.entries(partial) as [keyof PopupPersistentState, unknown][]) {
+    if (!(key in next)) {
+      continue;
+    }
+    if (typeof value === 'undefined') {
+      continue;
+    }
+    if (!valuesEqual(next[key], value)) {
+      next[key] = value as any;
+      changed = true;
+    }
+  }
+
+  if (!changed) {
+    return;
+  }
+
+  cachedState = next;
   if (persist) {
     await persistCachedState();
   }
@@ -230,10 +356,16 @@ async function updateCachedState(
   }
 }
 
-async function syncStateWithAuth(options: { persist?: boolean; broadcast?: boolean } = {}): Promise<void> {
-  const { persist = true, broadcast = true } = options;
+async function syncStateWithAuth(
+  options: { persist?: boolean; broadcast?: boolean; retainDisplayName?: boolean } = {}
+): Promise<void> {
+  const { persist = true, broadcast = true, retainDisplayName = false } = options;
   const loggedIn = twitchAuth !== null;
-  const displayName = twitchAuth?.displayName ?? null;
+  const displayName = loggedIn
+    ? twitchAuth?.displayName ?? null
+    : retainDisplayName
+    ? cachedState.twitchDisplayName
+    : null;
   await updateCachedState(
     {
       loggedIn,
@@ -252,14 +384,18 @@ function isAuthUsable(auth: TwitchAuthData): boolean {
   return getAuthRemainingMs(auth) > AUTH_EXPIRY_PADDING_MS;
 }
 
-async function setAuthData(next: TwitchAuthData | null, options: { broadcast?: boolean } = {}): Promise<void> {
+async function setAuthData(
+  next: TwitchAuthData | null,
+  options: { broadcast?: boolean; retainDisplayName?: boolean } = {}
+): Promise<void> {
+  const { broadcast = true, retainDisplayName = false } = options;
   twitchAuth = next;
   if (next) {
     await saveToStorage(TWITCH_AUTH_STORAGE_KEY, next);
   } else {
     await removeFromStorage(TWITCH_AUTH_STORAGE_KEY);
   }
-  await syncStateWithAuth({ broadcast: options.broadcast });
+  await syncStateWithAuth({ broadcast, retainDisplayName });
 }
 async function refreshStoredProfile(): Promise<void> {
   if (!twitchAuth) return;
@@ -288,22 +424,39 @@ async function refreshStoredProfile(): Promise<void> {
   }
 }
 
-async function handleExpiredToken(message = 'Token expired'): Promise<void> {
-  updateDiagnostics({
-    lastError: message,
+async function handleExpiredToken(
+  message = 'Token expired',
+  options: { retainDisplayName?: boolean; preserveDiagnostics?: boolean } = {}
+): Promise<void> {
+  const { retainDisplayName = true, preserveDiagnostics = false } = options;
+  const diagnosticsUpdate: Partial<TwitchDiagnosticsSnapshot> = {
     websocketConnected: false,
     sessionId: null,
     subscriptions: 0,
     tokenType: null,
     tokenClientId: null,
     tokenExpiresIn: null
-  });
-  await setAuthData(null, { broadcast: true });
+  };
+  if (!preserveDiagnostics) {
+    diagnosticsUpdate.lastError = message;
+  }
+  updateDiagnostics(diagnosticsUpdate);
+  subscriptionRetryBlocked = true;
+  clearChannelRewardTimer();
+  channelRewardLastFetchedAt = 0;
+  channelRewardFetchInFlight = false;
+  if (cachedState.channelPointRewards?.length) {
+    await updateCachedState({ channelPointRewards: [] });
+  }
+  await setAuthData(null, { broadcast: true, retainDisplayName });
   cleanupEventSub();
 }
 
 async function handleAuthFailure(reason: unknown): Promise<void> {
   console.warn('[background] Twitch authentication failure', reason);
+  if (reason instanceof TokenValidationError || reason instanceof MissingScopesError) {
+    return;
+  }
   const message = typeof reason === 'string' ? reason : 'Authentication required';
   await handleExpiredToken(message);
 }
@@ -504,7 +657,8 @@ async function ensureValidatedAuth(): Promise<TwitchAuthData> {
         sessionId: null,
         subscriptions: 0
       });
-      await setAuthData(null, { broadcast: true });
+      subscriptionRetryBlocked = true;
+      await setAuthData(null, { broadcast: true, retainDisplayName: true });
       cleanupEventSub();
       throw error;
     }
@@ -515,7 +669,8 @@ async function ensureValidatedAuth(): Promise<TwitchAuthData> {
         tokenClientId: null,
         tokenExpiresIn: null
       });
-      await setAuthData(null, { broadcast: true });
+      subscriptionRetryBlocked = true;
+      await setAuthData(null, { broadcast: true, retainDisplayName: true });
       cleanupEventSub();
       throw error;
     }
@@ -562,19 +717,30 @@ async function startEventSub(): Promise<void> {
   }
 
   await ensureValidatedAuth();
-  cleanupEventSub();
+  subscriptionRetryBlocked = false;
+  reconnectBackoffMs = INITIAL_BACKOFF_MS;
+  prepareForNewConnection();
   connectEventSub();
+  scheduleChannelRewardRefresh(0);
 }
 
 function connectEventSub(url?: string): void {
-  if (!twitchAuth || !isAuthUsable(twitchAuth)) {
+  if (!twitchAuth || !isAuthUsable(twitchAuth) || subscriptionRetryBlocked) {
     return;
   }
+  if (eventSubConnectionState === 'connecting' || eventSubConnectionState === 'ready') {
+    return;
+  }
+
+  prepareForNewConnection();
+
   const target = url ?? TWITCH_EVENTSUB_WS;
+  eventSubConnectionState = 'connecting';
+  updateDiagnostics({ websocketConnected: false, sessionId: null });
+
   try {
     const socket = new WebSocket(target);
     eventSubSocket = socket;
-    updateDiagnostics({ websocketConnected: false, sessionId: null });
 
     socket.addEventListener('open', () => {
       updateDiagnostics({ websocketConnected: true, lastError: null });
@@ -586,11 +752,16 @@ function connectEventSub(url?: string): void {
 
     socket.addEventListener('close', (event) => {
       console.info('[background] EventSub socket closed', event.code, event.reason);
-      eventSubSocket = null;
-      eventSubSessionId = null;
-      reconnectBackoffMs = Math.min(reconnectBackoffMs * 2, MAX_BACKOFF_MS);
-      clearKeepaliveTimer();
+      if (eventSubSocket === socket) {
+        eventSubSocket = null;
+      }
+      eventSubConnectionState = 'closed';
+      prepareForNewConnection();
       updateDiagnostics({ websocketConnected: false, sessionId: null, subscriptions: 0 });
+      if (suppressedCloseSocket === socket) {
+        suppressedCloseSocket = null;
+        return;
+      }
       scheduleReconnect('socket-close');
     });
 
@@ -600,6 +771,7 @@ function connectEventSub(url?: string): void {
     });
   } catch (error) {
     console.error('[background] Failed to open EventSub socket', error);
+    eventSubConnectionState = 'idle';
     scheduleReconnect('socket-error');
   }
 }
@@ -611,38 +783,162 @@ function clearKeepaliveTimer(): void {
   }
 }
 
-function scheduleReconnect(reason: string): void {
+function clearSubscriptionTimers(): void {
+  if (ensureSubscriptionsTimer) {
+    clearTimeout(ensureSubscriptionsTimer);
+    ensureSubscriptionsTimer = null;
+  }
+  if (subscriptionDeadlineTimer) {
+    clearTimeout(subscriptionDeadlineTimer);
+    subscriptionDeadlineTimer = null;
+  }
+}
+
+function clearReconnectTimer(): void {
+  if (eventSubReconnectTimer) {
+    clearTimeout(eventSubReconnectTimer);
+    eventSubReconnectTimer = null;
+  }
+}
+
+function clearChannelRewardTimer(): void {
+  if (channelRewardTimer) {
+    clearTimeout(channelRewardTimer);
+    channelRewardTimer = null;
+  }
+}
+
+function closeEventSubSocket(options: { suppressReconnect?: boolean } = {}): void {
+  const socket = eventSubSocket;
+  if (!socket) {
+    return;
+  }
+  if (options.suppressReconnect) {
+    suppressedCloseSocket = socket;
+  }
+  try {
+    socket.close();
+  } catch (error) {
+    console.warn('[background] Error closing EventSub socket', error);
+  }
+  eventSubSocket = null;
+}
+
+function prepareForNewConnection(): void {
+  clearReconnectTimer();
+  clearSubscriptionTimers();
+  clearKeepaliveTimer();
+  closeEventSubSocket({ suppressReconnect: true });
+  eventSubSessionId = null;
+  subscriptionsReady = false;
+  ensureSubscriptionsInFlight = false;
+}
+
+function scheduleSubscriptionSync(delayMs = 0): void {
+  if (subscriptionRetryBlocked) {
+    return;
+  }
+  if (ensureSubscriptionsTimer) {
+    clearTimeout(ensureSubscriptionsTimer);
+  }
+  ensureSubscriptionsTimer = setTimeout(() => {
+    ensureSubscriptionsTimer = null;
+    void ensureSubscriptions();
+  }, delayMs);
+
+  if (subscriptionDeadlineTimer) {
+    clearTimeout(subscriptionDeadlineTimer);
+  }
+  subscriptionDeadlineTimer = setTimeout(() => {
+    subscriptionDeadlineTimer = null;
+    if (!subscriptionsReady) {
+      updateDiagnostics({ lastError: 'Subscription creation timeout', subscriptions: 0 });
+      cleanupEventSub({ resetBackoff: false });
+      scheduleReconnect('subscription-timeout');
+    }
+  }, SUBSCRIPTION_CREATE_WINDOW_MS);
+}
+
+function scheduleChannelRewardRefresh(delayMs = CHANNEL_REWARD_REFRESH_INTERVAL_MS): void {
   if (!twitchAuth || !isAuthUsable(twitchAuth)) {
+    clearChannelRewardTimer();
+    return;
+  }
+  if (delayMs === 0 && channelRewardLastFetchedAt > 0) {
+    const elapsed = Date.now() - channelRewardLastFetchedAt;
+    if (elapsed < CHANNEL_REWARD_REFRESH_INTERVAL_MS) {
+      delayMs = CHANNEL_REWARD_REFRESH_INTERVAL_MS - elapsed;
+    }
+  }
+  if (channelRewardTimer) {
+    clearTimeout(channelRewardTimer);
+  }
+  channelRewardTimer = setTimeout(() => {
+    channelRewardTimer = null;
+    void refreshChannelPointRewards();
+  }, Math.max(0, delayMs));
+}
+
+async function refreshChannelPointRewards(): Promise<void> {
+  if (!twitchAuth || channelRewardFetchInFlight) {
+    return;
+  }
+  channelRewardFetchInFlight = true;
+  try {
+    const auth = await ensureValidatedAuth();
+    const params = new URLSearchParams({ broadcaster_id: auth.userId });
+    const response = await helixFetch(`/channel_points/custom_rewards?${params.toString()}`);
+    if (!response.ok) {
+      return;
+    }
+    const body = (await response.json()) as {
+      data?: Array<{ id: string; title?: string; prompt?: string }>;
+    };
+    const rewards: ChannelPointRewardSummary[] = (body.data ?? [])
+      .map((reward) => ({
+        id: reward.id,
+        title: reward.title?.trim() || reward.prompt?.trim() || reward.id
+      }))
+      .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
+
+    channelRewardLastFetchedAt = Date.now();
+    const current = cachedState.channelPointRewards ?? [];
+    if (JSON.stringify(current) !== JSON.stringify(rewards)) {
+      await updateCachedState({ channelPointRewards: rewards });
+    }
+  } catch (error) {
+    console.warn('[background] Failed to refresh channel point rewards', error);
+  } finally {
+    channelRewardFetchInFlight = false;
+    scheduleChannelRewardRefresh(CHANNEL_REWARD_REFRESH_INTERVAL_MS);
+  }
+}
+
+function scheduleReconnect(reason: string): void {
+  if (!twitchAuth || !isAuthUsable(twitchAuth) || subscriptionRetryBlocked) {
     return;
   }
   if (eventSubReconnectTimer) {
     return;
   }
-  updateDiagnostics({ lastError: reason });
+  updateDiagnostics({ lastError: reason, websocketConnected: false });
   const delay = reconnectBackoffMs;
+  reconnectBackoffMs = Math.min(reconnectBackoffMs * 2, MAX_BACKOFF_MS);
+  eventSubConnectionState = 'reconnecting';
   eventSubReconnectTimer = setTimeout(() => {
     eventSubReconnectTimer = null;
     connectEventSub();
   }, delay);
 }
 
-function cleanupEventSub(): void {
-  if (eventSubReconnectTimer) {
-    clearTimeout(eventSubReconnectTimer);
-    eventSubReconnectTimer = null;
+function cleanupEventSub(options: { resetBackoff?: boolean } = {}): void {
+  const { resetBackoff = true } = options;
+  prepareForNewConnection();
+  eventSubConnectionState = 'idle';
+  if (resetBackoff) {
+    reconnectBackoffMs = INITIAL_BACKOFF_MS;
   }
-  clearKeepaliveTimer();
-  if (eventSubSocket) {
-    try {
-      eventSubSocket.close();
-    } catch (error) {
-      console.warn('[background] Error closing EventSub socket', error);
-    }
-  }
-  eventSubSocket = null;
-  eventSubSessionId = null;
   updateDiagnostics({ websocketConnected: false, sessionId: null, subscriptions: 0 });
-  reconnectBackoffMs = INITIAL_BACKOFF_MS;
 }
 
 function handleEventSubMessage(raw: string): void {
@@ -682,11 +978,14 @@ function handleEventSubMessage(raw: string): void {
 function handleSessionWelcome(payload: any): void {
   const session = payload?.session;
   eventSubSessionId = session?.id ?? null;
+  eventSubConnectionState = 'ready';
   reconnectBackoffMs = INITIAL_BACKOFF_MS;
   keepaliveTimeoutMs = (session?.keepalive_timeout_seconds ?? 10) * 1000;
+  subscriptionsReady = false;
+  ensureSubscriptionsInFlight = false;
   updateDiagnostics({ sessionId: eventSubSessionId, lastError: null });
   recordKeepalive();
-  void ensureSubscriptions();
+  scheduleSubscriptionSync();
 }
 
 function recordKeepalive(): void {
@@ -726,7 +1025,7 @@ function handleNotification(payload: any): void {
 function handleSessionReconnect(payload: any): void {
   const url: string | null = payload?.session?.reconnect_url ?? null;
   console.info('[background] EventSub requested reconnect', url);
-  cleanupEventSub();
+  cleanupEventSub({ resetBackoff: false });
   reconnectBackoffMs = INITIAL_BACKOFF_MS;
   if (url) {
     connectEventSub(url);
@@ -739,7 +1038,7 @@ function handleRevocation(payload: any): void {
   const type: string = payload?.subscription?.type ?? 'unknown';
   console.warn('[background] Subscription revoked', type, payload?.status);
   updateDiagnostics({ lastError: `Revoked: ${type}` });
-  void ensureSubscriptions();
+  scheduleSubscriptionSync();
 }
 
 function handleSessionClose(payload: any): void {
@@ -750,11 +1049,24 @@ function handleSessionClose(payload: any): void {
   scheduleReconnect('session-close');
 }
 async function ensureSubscriptions(): Promise<void> {
-  if (!twitchAuth || !eventSubSessionId) {
+  if (!twitchAuth || !eventSubSessionId || subscriptionRetryBlocked || ensureSubscriptionsInFlight) {
     return;
   }
+
+  ensureSubscriptionsInFlight = true;
   try {
-    const definitions = getRequiredEventSubDefinitions(twitchAuth.userId);
+    const broadcasterId = twitchAuth.userId;
+    const moderatorId = twitchAuth.userId;
+    if (!broadcasterId || !moderatorId) {
+      subscriptionRetryBlocked = true;
+      updateDiagnostics({ lastError: 'Missing follow subscription identifiers', subscriptions: 0 });
+      clearSubscriptionTimers();
+      clearChannelRewardTimer();
+      cleanupEventSub({ resetBackoff: false });
+      return;
+    }
+
+    const definitions = getRequiredEventSubDefinitions(broadcasterId, moderatorId);
     const existing = await listSubscriptions();
     let active = 0;
 
@@ -779,11 +1091,26 @@ async function ensureSubscriptions(): Promise<void> {
       }
     }
 
+    subscriptionsReady = true;
     updateDiagnostics({ subscriptions: active, lastError: null });
+    if (subscriptionDeadlineTimer) {
+      clearTimeout(subscriptionDeadlineTimer);
+      subscriptionDeadlineTimer = null;
+    }
   } catch (error) {
+    if (error instanceof HelixRequestError && error.status === 403) {
+      subscriptionRetryBlocked = true;
+      updateDiagnostics({ lastError: JSON.stringify({ status: error.status, body: error.body }) });
+      clearSubscriptionTimers();
+      clearChannelRewardTimer();
+      cleanupEventSub({ resetBackoff: false });
+      return;
+    }
     console.error('[background] Failed to ensure EventSub subscriptions', error);
     updateDiagnostics({ lastError: 'Subscription sync failed' });
     scheduleReconnect('ensure-subscriptions');
+  } finally {
+    ensureSubscriptionsInFlight = false;
   }
 }
 
@@ -810,7 +1137,17 @@ async function createSubscription(definition: EventSubSubscriptionDefinition): P
     })
   });
   if (!response.ok) {
-    throw new Error(`Failed to create subscription (${response.status})`);
+    let body: unknown = null;
+    try {
+      body = sanitizeForDiagnostics(await response.json());
+    } catch (error) {
+      try {
+        body = await response.text();
+      } catch {
+        body = null;
+      }
+    }
+    throw new HelixRequestError(response.status, body, `Failed to create subscription (${response.status})`);
   }
 }
 
@@ -973,7 +1310,14 @@ async function disconnectFromTwitch(): Promise<ActionResult> {
     await deleteAllSubscriptions();
   }
   cleanupEventSub();
-  await setAuthData(null, { broadcast: true });
+  clearChannelRewardTimer();
+  channelRewardLastFetchedAt = 0;
+  channelRewardFetchInFlight = false;
+  subscriptionRetryBlocked = false;
+  if (cachedState.channelPointRewards?.length) {
+    await updateCachedState({ channelPointRewards: [] });
+  }
+  await setAuthData(null, { broadcast: true, retainDisplayName: false });
   updateDiagnostics({ lastError: null, subscriptions: 0, sessionId: null, websocketConnected: false });
   return { status: 'ok', messageKey: 'toasts.twitchDisconnected' };
 }
