@@ -158,6 +158,9 @@ class PopupApp {
   private toast: ToastManager;
   private confirmDialog: ConfirmDialog;
   private languageMenuOpen = false;
+  private editingValue: 'transpose' | 'speed' | null = null;
+  private editingValueDraft = '';
+  private editingValueInitial: number | null = null;
   private readonly twitchIconUrl = chrome.runtime.getURL('assets/icons/twitch.svg');
 
   constructor(private readonly root: HTMLElement) {
@@ -411,16 +414,18 @@ class PopupApp {
     void this.persistState();
   }
 
-  private formatSemitoneLabel(): string {
+  private formatSemitoneValue(): string {
     const value = this.state.semitoneOffset;
-    const prefix = value > 0 ? '+' : value < 0 ? '−' : '';
-    const magnitude = Math.abs(value);
-    const unitKey = magnitude === 1 ? i18n.t('transpose.unitSingle') : i18n.t('transpose.unitPlural');
-    const number = prefix ? `${prefix}${magnitude}` : `${magnitude}`;
-    return `${number} ${unitKey}`.trim();
+    if (value > 0) {
+      return `+${value}`;
+    }
+    if (value < 0) {
+      return `-${Math.abs(value)}`;
+    }
+    return '0';
   }
 
-  private formatSpeedLabel(): string {
+  private formatSpeedValue(): string {
     return `${this.state.speedPercent}%`;
   }
 
@@ -467,30 +472,49 @@ class PopupApp {
   }
 
   private adjustSemitone(delta: number): void {
-    const value = Math.max(-12, Math.min(12, this.state.semitoneOffset + delta));
-    this.state = { ...this.state, semitoneOffset: value };
-    this.render();
-    void this.persistState();
+    this.setSemitone(this.state.semitoneOffset + delta);
   }
 
-  private setSemitone(value: number): void {
-    this.state = { ...this.state, semitoneOffset: value };
-    this.render();
-    void this.persistState();
+  private setSemitone(
+    value: number,
+    options: { render?: boolean; persist?: boolean; forcePersist?: boolean; forceRender?: boolean } = {}
+  ): void {
+    const bounded = Math.max(-12, Math.min(12, Math.round(value)));
+    const changed = this.state.semitoneOffset !== bounded;
+    if (changed) {
+      this.state = { ...this.state, semitoneOffset: bounded };
+    }
+    if (options.render === false) {
+      this.syncControlDisplays();
+    } else if (changed || options.forceRender) {
+      this.render();
+    }
+    if ((changed && options.persist !== false) || options.forcePersist) {
+      void this.persistState();
+    }
   }
 
   private adjustSpeed(delta: number): void {
-    const next = Math.max(50, Math.min(200, this.state.speedPercent + delta));
-    this.state = { ...this.state, speedPercent: next };
-    this.render();
-    void this.persistState();
+    this.setSpeed(this.state.speedPercent + delta);
   }
 
-  private setSpeed(value: number): void {
-    const bounded = Math.max(50, Math.min(200, value));
-    this.state = { ...this.state, speedPercent: bounded };
-    this.render();
-    void this.persistState();
+  private setSpeed(
+    value: number,
+    options: { render?: boolean; persist?: boolean; forcePersist?: boolean; forceRender?: boolean } = {}
+  ): void {
+    const bounded = Math.max(50, Math.min(200, Math.round(value)));
+    const changed = this.state.speedPercent !== bounded;
+    if (changed) {
+      this.state = { ...this.state, speedPercent: bounded };
+    }
+    if (options.render === false) {
+      this.syncControlDisplays();
+    } else if (changed || options.forceRender) {
+      this.render();
+    }
+    if ((changed && options.persist !== false) || options.forcePersist) {
+      void this.persistState();
+    }
   }
 
   private resetTranspose(): void {
@@ -499,6 +523,114 @@ class PopupApp {
 
   private resetSpeed(): void {
     this.setSpeed(100);
+  }
+
+  private syncControlDisplays(): void {
+    const transposeSlider = this.root.querySelector<HTMLInputElement>('[data-role="transpose-slider"]');
+    if (transposeSlider) {
+      const value = String(this.state.semitoneOffset);
+      if (transposeSlider.value !== value) {
+        transposeSlider.value = value;
+      }
+    }
+    if (this.editingValue !== 'transpose') {
+      const transposeValue = this.root.querySelector<HTMLElement>('[data-role="transpose-value-display"]');
+      if (transposeValue) {
+        transposeValue.textContent = this.formatSemitoneValue();
+      }
+    }
+
+    const speedSlider = this.root.querySelector<HTMLInputElement>('[data-role="speed-slider"]');
+    if (speedSlider) {
+      const value = String(this.state.speedPercent);
+      if (speedSlider.value !== value) {
+        speedSlider.value = value;
+      }
+    }
+    if (this.editingValue !== 'speed') {
+      const speedValue = this.root.querySelector<HTMLElement>('[data-role="speed-value-display"]');
+      if (speedValue) {
+        speedValue.textContent = this.formatSpeedValue();
+      }
+    }
+  }
+
+  private beginValueEdit(control: 'transpose' | 'speed'): void {
+    if (this.editingValue === control) {
+      return;
+    }
+    this.editingValue = control;
+    const current = control === 'transpose' ? this.state.semitoneOffset : this.state.speedPercent;
+    this.editingValueDraft = String(current);
+    this.editingValueInitial = current;
+    this.render();
+  }
+
+  private commitValueEdit(control: 'transpose' | 'speed'): void {
+    const selector = control === 'transpose' ? '[data-role="transpose-value-input"]' : '[data-role="speed-value-input"]';
+    const input = this.root.querySelector<HTMLInputElement>(selector);
+    if (!input) {
+      return;
+    }
+
+    const raw = input.value.trim();
+    const bounds = control === 'transpose' ? { min: -12, max: 12 } : { min: 50, max: 200 };
+    const fallback = this.editingValueInitial ?? (control === 'transpose' ? 0 : 100);
+    const messageKey = control === 'transpose' ? 'transpose.invalidValue' : 'speed.invalidValue';
+    const restore = () => {
+      this.toast.show(i18n.t(messageKey));
+      const restored = String(fallback);
+      this.editingValueDraft = restored;
+      requestAnimationFrame(() => {
+        input.value = restored;
+        input.focus();
+        input.select();
+      });
+    };
+
+    const pattern = control === 'transpose' ? /^[+-]?\d+$/ : /^[+]?\d+$/;
+    if (!pattern.test(raw)) {
+      restore();
+      return;
+    }
+
+    const parsed = Number.parseInt(raw, 10);
+
+    if (!Number.isFinite(parsed) || Number.isNaN(parsed) || parsed < bounds.min || parsed > bounds.max) {
+      restore();
+      return;
+    }
+
+    this.editingValue = null;
+    this.editingValueDraft = '';
+    this.editingValueInitial = null;
+
+    if (control === 'transpose') {
+      this.setSemitone(parsed);
+    } else {
+      this.setSpeed(parsed);
+    }
+  }
+
+  private cancelValueEdit(control: 'transpose' | 'speed'): void {
+    this.editingValue = null;
+    this.editingValueDraft = '';
+    this.editingValueInitial = null;
+    this.render();
+  }
+
+  private focusEditingInput(): void {
+    if (!this.editingValue) {
+      return;
+    }
+    const selector = this.editingValue === 'transpose' ? '[data-role="transpose-value-input"]' : '[data-role="speed-value-input"]';
+    const input = this.root.querySelector<HTMLInputElement>(selector);
+    if (input) {
+      requestAnimationFrame(() => {
+        input.focus();
+        input.select();
+      });
+    }
   }
 
   private toggleCapture(enabled: boolean): void {
@@ -677,12 +809,34 @@ class PopupApp {
   }
 
   private renderTransposeBlock(): string {
-    const label = this.formatSemitoneLabel();
+    const isEditing = this.editingValue === 'transpose';
+    const currentValue = isEditing ? this.editingValueDraft : this.formatSemitoneValue();
     return `
       <section class="control-block" aria-labelledby="transpose-heading">
         <div class="control-block__row control-block__row--top">
           <h2 id="transpose-heading" class="control-block__title">${i18n.t('transpose.title')}</h2>
-          <span class="control-block__value" aria-live="polite">${label}</span>
+          ${
+            isEditing
+              ? `<input
+                  type="number"
+                  class="control-block__value control-block__value-input"
+                  data-role="transpose-value-input"
+                  value="${currentValue}"
+                  min="-12"
+                  max="12"
+                  step="1"
+                  aria-label="${i18n.t('transpose.valueInputLabel')}"
+                  aria-live="polite"
+                />`
+              : `<button
+                  type="button"
+                  class="control-block__value control-block__value-button"
+                  data-action="transpose-begin-edit"
+                  data-role="transpose-value-display"
+                  aria-label="${i18n.t('transpose.valueButtonLabel')}"
+                  aria-live="polite"
+                >${currentValue}</button>`
+          }
           <button type="button" class="btn btn--ghost control-block__reset" data-action="transpose-reset">
             ${i18n.t('transpose.reset')}
           </button>
@@ -719,11 +873,34 @@ class PopupApp {
   }
 
   private renderSpeedBlock(): string {
+    const isEditing = this.editingValue === 'speed';
+    const currentValue = isEditing ? this.editingValueDraft : this.formatSpeedValue();
     return `
       <section class="control-block" aria-labelledby="speed-heading">
         <div class="control-block__row control-block__row--top">
           <h2 id="speed-heading" class="control-block__title">${i18n.t('speed.title')}</h2>
-          <span class="control-block__value" aria-live="polite">${this.formatSpeedLabel()}</span>
+          ${
+            isEditing
+              ? `<input
+                  type="number"
+                  class="control-block__value control-block__value-input"
+                  data-role="speed-value-input"
+                  value="${currentValue}"
+                  min="50"
+                  max="200"
+                  step="1"
+                  aria-label="${i18n.t('speed.valueInputLabel')}"
+                  aria-live="polite"
+                />`
+              : `<button
+                  type="button"
+                  class="control-block__value control-block__value-button"
+                  data-action="speed-begin-edit"
+                  data-role="speed-value-display"
+                  aria-label="${i18n.t('speed.valueButtonLabel')}"
+                  aria-live="polite"
+                >${currentValue}</button>`
+          }
           <button type="button" class="btn btn--ghost control-block__reset" data-action="speed-reset">
             ${i18n.t('speed.reset')}
           </button>
@@ -1147,11 +1324,19 @@ class PopupApp {
 
     transposeSlider?.addEventListener('input', (event) => {
       const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
-      this.setSemitone(value);
+      this.setSemitone(value, { render: false, persist: false });
+    });
+    transposeSlider?.addEventListener('change', (event) => {
+      const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
+      this.setSemitone(value, { forcePersist: true, forceRender: true });
     });
     speedSlider?.addEventListener('input', (event) => {
       const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
-      this.setSpeed(value);
+      this.setSpeed(value, { render: false, persist: false });
+    });
+    speedSlider?.addEventListener('change', (event) => {
+      const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
+      this.setSpeed(value, { forcePersist: true, forceRender: true });
     });
     transposeDec?.addEventListener('click', () => this.adjustSemitone(-1));
     transposeInc?.addEventListener('click', () => this.adjustSemitone(1));
@@ -1179,6 +1364,48 @@ class PopupApp {
       openBindings.addEventListener('click', () => this.openBindingsList());
     }
     diagnosticsToggle?.addEventListener('click', () => this.toggleDiagnostics());
+
+    const transposeEditButton = this.root.querySelector<HTMLButtonElement>('[data-action="transpose-begin-edit"]');
+    const speedEditButton = this.root.querySelector<HTMLButtonElement>('[data-action="speed-begin-edit"]');
+    const transposeValueInput = this.root.querySelector<HTMLInputElement>('[data-role="transpose-value-input"]');
+    const speedValueInput = this.root.querySelector<HTMLInputElement>('[data-role="speed-value-input"]');
+
+    transposeEditButton?.addEventListener('click', () => this.beginValueEdit('transpose'));
+    speedEditButton?.addEventListener('click', () => this.beginValueEdit('speed'));
+
+    if (transposeValueInput) {
+      transposeValueInput.addEventListener('input', (event) => {
+        this.editingValueDraft = (event.target as HTMLInputElement).value;
+      });
+      transposeValueInput.addEventListener('blur', () => this.commitValueEdit('transpose'));
+      transposeValueInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.commitValueEdit('transpose');
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          this.cancelValueEdit('transpose');
+        }
+      });
+    }
+
+    if (speedValueInput) {
+      speedValueInput.addEventListener('input', (event) => {
+        this.editingValueDraft = (event.target as HTMLInputElement).value;
+      });
+      speedValueInput.addEventListener('blur', () => this.commitValueEdit('speed'));
+      speedValueInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          this.commitValueEdit('speed');
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          this.cancelValueEdit('speed');
+        }
+      });
+    }
+
+    this.focusEditingInput();
   }
 
   private bindTestEvents(form: HTMLFormElement): void {

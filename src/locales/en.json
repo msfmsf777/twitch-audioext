@@ -21,14 +21,20 @@
     "unitSingle": "key",
     "unitPlural": "keys",
     "decrementLabel": "Lower semitone",
-    "incrementLabel": "Raise semitone"
+    "incrementLabel": "Raise semitone",
+    "valueButtonLabel": "Edit transpose value",
+    "valueInputLabel": "Transpose semitone offset",
+    "invalidValue": "Enter a value between -12 and +12."
   },
   "speed": {
     "title": "Speed",
     "label": "Percent",
     "reset": "Reset",
     "decrementLabel": "Slow down",
-    "incrementLabel": "Speed up"
+    "incrementLabel": "Speed up",
+    "valueButtonLabel": "Edit speed value",
+    "valueInputLabel": "Playback speed percentage",
+    "invalidValue": "Enter a value between 50 and 200."
   },
   "twitch": {
     "statusDisconnected": "Disconnected",

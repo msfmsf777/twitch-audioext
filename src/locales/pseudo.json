@@ -21,14 +21,20 @@
     "unitSingle": "ķēŷ",
     "unitPlural": "ķēŷś",
     "decrementLabel": "Ļōŵēŕ śēmīŧōņē",
-    "incrementLabel": "Řàīśē śēmīŧōņē"
+    "incrementLabel": "Řàīśē śēmīŧōņē",
+    "valueButtonLabel": "Ĕđīŧ ŧŕàņśƥōśē ṽàļŭē",
+    "valueInputLabel": "Ŧŕàņśƥōśē śēmīŧōņē ōƒƒśēŧ",
+    "invalidValue": "Ĕņŧēŕ à ṽàļŭē ƀēŧŵēēņ −12 àņđ +12."
   },
   "speed": {
     "title": "Ŝƥēēđ",
     "label": "Ƥēŕćēņŧ",
     "reset": "Řēśēŧ",
     "decrementLabel": "Ŝļōŵ đōŵņ",
-    "incrementLabel": "Ŝƥēēđ ŭƥ"
+    "incrementLabel": "Ŝƥēēđ ŭƥ",
+    "valueButtonLabel": "Ĕđīŧ śƥēēđ ṽàļŭē",
+    "valueInputLabel": "Ƥļàŷƀàćķ śƥēēđ ƥēŗćēņŧàĝē",
+    "invalidValue": "Ĕņŧēŕ à ṽàļŭē ƀēŧŵēēņ 50 àņđ 200."
   },
   "twitch": {
     "statusDisconnected": "Đīśćōņņēćŧēđ",
