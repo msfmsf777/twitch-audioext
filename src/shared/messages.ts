@@ -9,6 +9,7 @@ export type PopupToBackgroundMessage =
   | { type: 'POPUP_TWITCH_CONNECT' }
   | { type: 'POPUP_TWITCH_RECONNECT' }
   | { type: 'POPUP_TWITCH_DISCONNECT' }
+  | { type: 'POPUP_REFRESH_REWARDS' }
   | {
       type: 'POPUP_TRIGGER_TEST_EVENT';
       payload: {
@@ -42,6 +43,21 @@ export type BackgroundToContentMessage =
       };
     }
   | { type: 'AUDIO_RESET' }
+  | {
+      type: 'AUDIO_EFFECT_APPLY';
+      payload: {
+        effectId: string;
+        pitch?: { op: 'add' | 'set'; semitones: number } | null;
+        speed?: { op: 'add' | 'set'; percent: number } | null;
+        delayMs?: number;
+        durationMs?: number | null;
+        source: 'event' | 'test';
+      };
+    }
+  | {
+      type: 'AUDIO_EFFECT_REVERT';
+      payload: { effectId: string };
+    }
   | { type: 'PING' };
 
 export type ContentToBackgroundMessage =
@@ -50,6 +66,10 @@ export type ContentToBackgroundMessage =
   | {
       type: 'AUDIO_STATUS';
       status: 'idle' | 'active';
+    }
+  | {
+      type: 'AUDIO_EFFECTS_UPDATE';
+      payload: { semitoneOffset: number; speedPercent: number };
     };
 
 export type PopupToContentMessage =

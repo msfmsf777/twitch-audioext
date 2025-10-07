@@ -11,7 +11,9 @@ import {
   type BindingEventType,
   type SubTier,
   type TestEventType,
-  type ChannelPointRewardSummary
+  type ChannelPointRewardSummary,
+  type RangeConfig,
+  type BindingDefinition
 } from '../shared/state';
 import { loadFromStorage, removeFromStorage, saveToStorage } from '../shared/storage';
 import {
@@ -30,6 +32,14 @@ import {
   type TwitchAuthData,
   type TwitchDiagnosticsSnapshot
 } from '../shared/twitch';
+import {
+  EVENT_LOG_LIMIT,
+  EVENT_LOG_STORAGE_KEY,
+  EVENT_LOG_UPDATED_AT_KEY,
+  type EventLogStatus,
+  type EventLogAction,
+  type EventLogEntry
+} from '../shared/event-log';
 
 const AUTH_EXPIRY_PADDING_MS = 60_000;
 const INITIAL_BACKOFF_MS = 1_000;
@@ -37,6 +47,12 @@ const MAX_BACKOFF_MS = 30_000;
 const STATE_BROADCAST_MIN_INTERVAL_MS = 500;
 const SUBSCRIPTION_CREATE_WINDOW_MS = 10_000;
 const CHANNEL_REWARD_REFRESH_INTERVAL_MS = 60_000;
+const REWARD_REFRESH_DEBOUNCE_MS = 15_000;
+const EVENT_LOG_WRITE_THROTTLE_MS = 500;
+const MESSAGE_ID_TTL_MS = 5 * 60_000;
+const EFFECT_STORAGE_KEY = 'effectAdjustments';
+const CHANNEL_REWARDS_STORAGE_KEY = 'channelRewards';
+const CHANNEL_REWARDS_UPDATED_AT_KEY = 'channelRewardsUpdatedAt';
 
 type TimeoutHandle = ReturnType<typeof setTimeout>;
 
@@ -50,6 +66,45 @@ interface RoutedEvent {
   bindingType: BindingEventType;
   receivedAt: number;
   payload: unknown;
+  messageId: string;
+}
+
+type NormalizedEvent =
+  | {
+      type: 'channel_points';
+      rewardId: string;
+      rewardTitle?: string;
+      rewardCost?: number | null;
+      userDisplay: string;
+    }
+  | { type: 'cheer'; amount: number; userDisplay: string }
+  | {
+      type: 'sub';
+      tier: '1000' | '2000' | '3000';
+      isGift: boolean;
+      giftAmount?: number | null;
+      userDisplay: string;
+    }
+  | { type: 'follow'; userDisplay: string };
+
+type EffectOperation =
+  | { kind: 'pitch'; op: 'add' | 'set'; semitones: number }
+  | { kind: 'speed'; op: 'add' | 'set'; percent: number }
+  | { kind: 'chat'; template: string };
+
+interface ScheduledEffect {
+  id: string;
+  bindingId: string;
+  bindingLabel: string;
+  operations: EffectOperation[];
+  delayMs: number;
+  durationMs: number | null;
+  event: NormalizedEvent;
+  eventSource: RoutedEventSource;
+  eventLogId: string | null;
+  applyTimer: TimeoutHandle | null;
+  revertTimer: TimeoutHandle | null;
+  applied: boolean;
 }
 
 interface HelixSubscription {
@@ -134,6 +189,15 @@ let channelRewardLastFetchedAt = 0;
 let ensureSubscriptionsInFlight = false;
 let suppressedCloseSocket: WebSocket | null = null;
 let channelRewardFetchInFlight = false;
+let lastManualRewardRefreshAt = 0;
+let channelRewards: ChannelPointRewardSummary[] = [];
+let eventLog: EventLogEntry[] = [];
+let lastEventLogSerialized: string | null = null;
+let eventLogWriteTimer: TimeoutHandle | null = null;
+let activeEffects: Map<string, ScheduledEffect> = new Map();
+let processedMessageIds: Map<string, number> = new Map();
+let effectAdjustments = { semitoneOffset: 0, speedPercent: 0 };
+let activeContentTabId: number | null = null;
 
 function getAuthExpiry(auth: TwitchAuthData): number {
   return auth.obtainedAt + auth.expiresIn * 1000;
@@ -206,6 +270,21 @@ async function init(): Promise<void> {
     ...defaults,
     ...storedState,
     testEvents: { ...defaults.testEvents, ...(storedState.testEvents ?? {}) }
+  };
+  channelRewards = await loadFromStorage(CHANNEL_REWARDS_STORAGE_KEY, [] as ChannelPointRewardSummary[]);
+  if (channelRewards.length && cachedState.channelPointRewards.length === 0) {
+    cachedState = { ...cachedState, channelPointRewards: channelRewards };
+  }
+  eventLog = await loadFromStorage(EVENT_LOG_STORAGE_KEY, [] as EventLogEntry[]);
+  const effectState = await loadFromStorage(
+    EFFECT_STORAGE_KEY,
+    { semitoneOffset: 0, speedPercent: 0 } as { semitoneOffset: number; speedPercent: number }
+  );
+  effectAdjustments = effectState ?? { semitoneOffset: 0, speedPercent: 0 };
+  cachedState = {
+    ...cachedState,
+    effectSemitoneOffset: effectAdjustments.semitoneOffset ?? 0,
+    effectSpeedPercent: effectAdjustments.speedPercent ?? 0
   };
   twitchAuth = await loadFromStorage(TWITCH_AUTH_STORAGE_KEY, null);
   await syncStateWithAuth({ persist: false, broadcast: false });
@@ -445,6 +524,15 @@ async function handleExpiredToken(
   clearChannelRewardTimer();
   channelRewardLastFetchedAt = 0;
   channelRewardFetchInFlight = false;
+  channelRewards = [];
+  await chrome.storage.local.set({
+    [CHANNEL_REWARDS_STORAGE_KEY]: [],
+    [CHANNEL_REWARDS_UPDATED_AT_KEY]: Date.now()
+  });
+  await clearAllScheduledEffects('skipped');
+  effectAdjustments = { semitoneOffset: 0, speedPercent: 0 };
+  await chrome.storage.local.set({ [EFFECT_STORAGE_KEY]: effectAdjustments });
+  await updateCachedState({ effectSemitoneOffset: 0, effectSpeedPercent: 0 });
   if (cachedState.channelPointRewards?.length) {
     await updateCachedState({ channelPointRewards: [] });
   }
@@ -711,6 +799,565 @@ async function helixFetch(path: string, init: RequestInit = {}, attempt = 0): Pr
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+function extractDisplayName(payload: any): string {
+  return (
+    payload?.user_name ||
+    payload?.user_display_name ||
+    payload?.user_login ||
+    payload?.from_broadcaster_user_name ||
+    payload?.login ||
+    payload?.username ||
+    ''
+  );
+}
+
+function normalizeEvent(
+  bindingType: BindingEventType,
+  payload: unknown,
+  subscriptionType: string
+): NormalizedEvent | null {
+  const data = payload as any;
+  switch (bindingType) {
+    case 'channel_points': {
+      const reward = data?.reward;
+      const rewardId: string | null = reward?.id ?? data?.id ?? null;
+      if (!rewardId) {
+        return null;
+      }
+      return {
+        type: 'channel_points',
+        rewardId,
+        rewardTitle: reward?.title ?? reward?.prompt ?? data?.reward_title ?? rewardId,
+        rewardCost: typeof reward?.cost === 'number' ? reward.cost : null,
+        userDisplay: extractDisplayName(data)
+      };
+    }
+    case 'bits': {
+      const amount = Number.parseInt(String(data?.bits ?? data?.amount ?? '0'), 10);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return null;
+      }
+      return { type: 'cheer', amount, userDisplay: extractDisplayName(data) };
+    }
+    case 'gift_sub':
+    case 'sub': {
+      const tier: string = data?.tier ?? data?.sub_tier ?? '1000';
+      const normalizedTier = tier === '2000' || tier === '3000' ? tier : '1000';
+      const isGift = Boolean(data?.is_gift || subscriptionType === 'channel.subscription.gift');
+      let giftAmount: number | null = null;
+      if (subscriptionType === 'channel.subscription.gift') {
+        const total = Number.parseInt(String(data?.total ?? data?.cumulative_total ?? 0), 10);
+        giftAmount = Number.isFinite(total) && total > 0 ? total : 1;
+      } else if (isGift) {
+        giftAmount = 1;
+      }
+      return {
+        type: 'sub',
+        tier: normalizedTier as '1000' | '2000' | '3000',
+        isGift,
+        giftAmount,
+        userDisplay: extractDisplayName(data)
+      };
+    }
+    case 'follow': {
+      return { type: 'follow', userDisplay: extractDisplayName(data) };
+    }
+    default:
+      return null;
+  }
+}
+
+function rangeMatches(range: RangeConfig, value: number): boolean {
+  if (range.mode === 'exact') {
+    const exact = range.exact;
+    return typeof exact === 'number' && exact === value;
+  }
+  const minOk = typeof range.min === 'number' ? value >= range.min : true;
+  const maxOk = typeof range.max === 'number' ? value <= range.max : true;
+  return minOk && maxOk;
+}
+
+function matchBindings(
+  normalized: NormalizedEvent,
+  bindingType: BindingEventType
+): Array<{ binding: BindingDefinition; operations: EffectOperation[] }> {
+  const matches: Array<{ binding: BindingDefinition; operations: EffectOperation[] }> = [];
+  for (const binding of cachedState.bindings) {
+    if (!binding.enabled || binding.eventType !== bindingType) {
+      continue;
+    }
+    let matched = false;
+    switch (bindingType) {
+      case 'channel_points': {
+        if (
+          normalized.type === 'channel_points' &&
+          binding.config.type === 'channel_points' &&
+          binding.config.rewardId &&
+          normalized.rewardId === binding.config.rewardId
+        ) {
+          matched = true;
+        }
+        break;
+      }
+      case 'bits': {
+        if (normalized.type === 'cheer' && binding.config.type === 'bits') {
+          matched = rangeMatches(binding.config.range, normalized.amount);
+        }
+        break;
+      }
+      case 'gift_sub': {
+        if (normalized.type === 'sub' && binding.config.type === 'gift_sub' && normalized.isGift) {
+          const giftCount = normalized.giftAmount ?? 1;
+          matched = rangeMatches(binding.config.range, giftCount);
+        }
+        break;
+      }
+      case 'sub': {
+        if (normalized.type === 'sub' && binding.config.type === 'sub' && !normalized.isGift) {
+          const tiers = binding.config.tiers ?? [];
+          matched = tiers.length === 0 || tiers.includes(mapTierToSubTier(normalized.tier));
+        }
+        break;
+      }
+      case 'follow': {
+        if (normalized.type === 'follow' && binding.config.type === 'follow') {
+          matched = true;
+        }
+        break;
+      }
+      default:
+        matched = false;
+    }
+    if (!matched) {
+      continue;
+    }
+    const operations: EffectOperation[] = [];
+    if (binding.action.type === 'pitch') {
+      operations.push({ kind: 'pitch', op: 'add', semitones: binding.action.amount });
+    } else if (binding.action.type === 'speed') {
+      operations.push({ kind: 'speed', op: 'add', percent: binding.action.amount });
+    }
+    if (binding.chatTemplate.trim()) {
+      operations.push({ kind: 'chat', template: binding.chatTemplate });
+    }
+    if (operations.length > 0) {
+      matches.push({ binding, operations });
+    }
+  }
+  return matches;
+}
+
+function mapTierToSubTier(tier: '1000' | '2000' | '3000'): SubTier {
+  switch (tier) {
+    case '2000':
+      return 'tier2';
+    case '3000':
+      return 'tier3';
+    default:
+      return 'tier1';
+  }
+}
+
+function mapSubTierToTier(tier: SubTier): '1000' | '2000' | '3000' {
+  switch (tier) {
+    case 'tier2':
+      return '2000';
+    case 'tier3':
+      return '3000';
+    default:
+      return '1000';
+  }
+}
+
+function mapEventType(normalized: NormalizedEvent, bindingType: BindingEventType): EventLogEntry['eventType'] {
+  if (bindingType === 'gift_sub' || (normalized.type === 'sub' && normalized.isGift)) {
+    return 'gift_sub';
+  }
+  switch (bindingType) {
+    case 'channel_points':
+      return 'channel_points';
+    case 'bits':
+      return 'cheer';
+    case 'sub':
+      return 'sub';
+    case 'follow':
+      return 'follow';
+    default:
+      return 'follow';
+  }
+}
+
+function createEventLogEntryForEffect(
+  event: NormalizedEvent,
+  binding: BindingDefinition,
+  bindingType: BindingEventType,
+  operations: EffectOperation[],
+  source: RoutedEventSource,
+  delaySeconds: number | null,
+  durationSeconds: number | null
+): EventLogEntry {
+  const id = crypto.randomUUID();
+  const entry: EventLogEntry = {
+    id,
+    ts: Date.now(),
+    source: source === 'test' ? 'test' : 'real',
+    eventType: mapEventType(event, bindingType),
+    userDisplay: event.userDisplay ?? undefined,
+    reward:
+      event.type === 'channel_points'
+        ? { id: event.rewardId, title: event.rewardTitle ?? event.rewardId, cost: event.rewardCost }
+        : undefined,
+    bitsAmount: event.type === 'cheer' ? event.amount : undefined,
+    subTier: event.type === 'sub' ? event.tier : undefined,
+    giftAmount: event.type === 'sub' && event.isGift ? event.giftAmount ?? 1 : undefined,
+    matchedBindings: [{ id: binding.id, label: binding.label }],
+    actions: operations.map((operation) => ({ ...operation } as EventLogAction)),
+    delaySec: delaySeconds ?? undefined,
+    durationSec: durationSeconds ?? undefined,
+    status: 'queued'
+  };
+  appendEventLogEntry(entry);
+  return entry;
+}
+
+function logSkippedEvent(
+  event: NormalizedEvent,
+  bindingType: BindingEventType,
+  source: RoutedEventSource,
+  note: string
+): void {
+  appendEventLogEntry({
+    id: crypto.randomUUID(),
+    ts: Date.now(),
+    source: source === 'test' ? 'test' : 'real',
+    eventType: mapEventType(event, bindingType),
+    userDisplay: event.userDisplay ?? undefined,
+    reward:
+      event.type === 'channel_points'
+        ? { id: event.rewardId, title: event.rewardTitle ?? event.rewardId, cost: event.rewardCost }
+        : undefined,
+    bitsAmount: event.type === 'cheer' ? event.amount : undefined,
+    subTier: event.type === 'sub' ? event.tier : undefined,
+    giftAmount: event.type === 'sub' && event.isGift ? event.giftAmount ?? 1 : undefined,
+    matchedBindings: [],
+    actions: [],
+    status: 'skipped',
+    note
+  });
+}
+
+async function updateEffectAdjustmentsFromStorageValue(value: unknown): Promise<void> {
+  const data = (value as { semitoneOffset?: number; speedPercent?: number }) ?? {};
+  const semitone = Number.isFinite(data.semitoneOffset) ? Number(data.semitoneOffset) : 0;
+  const speed = Number.isFinite(data.speedPercent) ? Number(data.speedPercent) : 0;
+  effectAdjustments = { semitoneOffset: semitone, speedPercent: speed };
+  await updateCachedState(
+    { effectSemitoneOffset: semitone, effectSpeedPercent: speed },
+    { persist: true, broadcast: true }
+  );
+}
+
+async function pushEffectAdjustmentsFromActive(): Promise<void> {
+  let semitone = 0;
+  let speed = 0;
+  for (const effect of activeEffects.values()) {
+    if (!effect.applied) {
+      continue;
+    }
+    for (const op of effect.operations) {
+      if (op.kind === 'pitch') {
+        semitone += op.semitones;
+      } else if (op.kind === 'speed') {
+        speed += op.percent;
+      }
+    }
+  }
+  if (
+    effectAdjustments.semitoneOffset === semitone &&
+    effectAdjustments.speedPercent === speed
+  ) {
+    return;
+  }
+  effectAdjustments = { semitoneOffset: semitone, speedPercent: speed };
+  await chrome.storage.local.set({
+    [EFFECT_STORAGE_KEY]: effectAdjustments
+  });
+  await updateCachedState(
+    { effectSemitoneOffset: semitone, effectSpeedPercent: speed },
+    { persist: true, broadcast: true }
+  );
+}
+
+async function sendChatMessage(
+  template: string,
+  event: NormalizedEvent
+): Promise<{ messageId?: string; error?: string }> {
+  try {
+    const auth = await ensureValidatedAuth();
+    const message = template.replace(/%user%/gi, () => event.userDisplay ?? '');
+    if (!message.trim()) {
+      return { error: 'empty_message' };
+    }
+    const response = await helixFetch('/chat/messages', {
+      method: 'POST',
+      body: JSON.stringify({
+        broadcaster_id: auth.userId,
+        sender_id: auth.userId,
+        message
+      })
+    });
+    if (!response.ok) {
+      let body: unknown = null;
+      try {
+        body = await response.json();
+      } catch (error) {
+        try {
+          body = await response.text();
+        } catch {
+          body = null;
+        }
+      }
+      const sanitized = sanitizeForDiagnostics(body);
+      return { error: JSON.stringify({ status: response.status, body: sanitized }) };
+    }
+    const parsed = (await response.json()) as { data?: Array<{ message_id?: string; id?: string }> };
+    const record = parsed.data?.[0];
+    const messageId = record?.message_id ?? record?.id ?? undefined;
+    return { messageId };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+}
+
+async function sendEffectMessage(message: BackgroundToContentMessage): Promise<void> {
+  try {
+    const tabId = activeContentTabId;
+    if (typeof tabId !== 'number') {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      chrome.tabs.sendMessage(tabId, message, () => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    });
+  } catch (error) {
+    console.warn('[background] Failed to send effect message', error);
+  }
+}
+
+async function applyScheduledEffect(effectId: string): Promise<void> {
+  const effect = activeEffects.get(effectId);
+  if (!effect || effect.applied) {
+    return;
+  }
+  if (effect.applyTimer) {
+    clearTimeout(effect.applyTimer);
+    effect.applyTimer = null;
+  }
+  const pitchOp = effect.operations.find((op) => op.kind === 'pitch') as
+    | Extract<EffectOperation, { kind: 'pitch' }>
+    | undefined;
+  const speedOp = effect.operations.find((op) => op.kind === 'speed') as
+    | Extract<EffectOperation, { kind: 'speed' }>
+    | undefined;
+  await sendEffectMessage({
+    type: 'AUDIO_EFFECT_APPLY',
+    payload: {
+      effectId: effect.id,
+      pitch: pitchOp ? { op: pitchOp.op, semitones: pitchOp.semitones } : null,
+      speed: speedOp ? { op: speedOp.op, percent: speedOp.percent } : null,
+      delayMs: effect.delayMs,
+      durationMs: effect.durationMs,
+      source: effect.eventSource === 'test' ? 'test' : 'event'
+    }
+  });
+  effect.applied = true;
+  updateEventLogEntry(effect.eventLogId ?? '', { status: 'applied' });
+  await pushEffectAdjustmentsFromActive();
+  await handleChatOperations(effect);
+  if (effect.durationMs !== null) {
+    effect.revertTimer = setTimeout(() => {
+      void revertScheduledEffect(effect.id);
+    }, effect.durationMs);
+  }
+}
+
+async function revertScheduledEffect(effectId: string, status: EventLogStatus = 'reverted'): Promise<void> {
+  const effect = activeEffects.get(effectId);
+  if (!effect) {
+    return;
+  }
+  if (effect.applyTimer) {
+    clearTimeout(effect.applyTimer);
+    effect.applyTimer = null;
+  }
+  if (effect.revertTimer) {
+    clearTimeout(effect.revertTimer);
+    effect.revertTimer = null;
+  }
+  if (effect.applied) {
+    await sendEffectMessage({ type: 'AUDIO_EFFECT_REVERT', payload: { effectId } });
+  }
+  activeEffects.delete(effectId);
+  if (effect.eventLogId) {
+    updateEventLogEntry(effect.eventLogId, { status });
+  }
+  await pushEffectAdjustmentsFromActive();
+}
+
+async function handleChatOperations(effect: ScheduledEffect): Promise<void> {
+  for (const op of effect.operations) {
+    if (op.kind !== 'chat') {
+      continue;
+    }
+    const result = await sendChatMessage(op.template, effect.event);
+    if (effect.eventLogId) {
+      updateEventLogEntry(
+        effect.eventLogId,
+        {},
+        (actions) =>
+          actions.map((action) => {
+            if (action.kind !== 'chat' || action.template !== op.template) {
+              return action;
+            }
+            return {
+              ...action,
+              sent: !result.error,
+              messageId: result.messageId,
+              error: result.error
+            };
+          })
+      );
+    }
+  }
+}
+
+async function queueEffect(
+  binding: BindingDefinition,
+  normalized: NormalizedEvent,
+  bindingType: BindingEventType,
+  operations: EffectOperation[],
+  source: RoutedEventSource
+): Promise<void> {
+  const delaySeconds = binding.delaySeconds ?? null;
+  const durationSeconds = binding.durationSeconds ?? null;
+  const entry = createEventLogEntryForEffect(
+    normalized,
+    binding,
+    bindingType,
+    operations,
+    source,
+    delaySeconds,
+    durationSeconds
+  );
+  const effect: ScheduledEffect = {
+    id: crypto.randomUUID(),
+    bindingId: binding.id,
+    bindingLabel: binding.label,
+    operations,
+    delayMs: Math.max(0, (delaySeconds ?? 0) * 1000),
+    durationMs: durationSeconds != null ? Math.max(0, durationSeconds * 1000) : null,
+    event: normalized,
+    eventSource: source,
+    eventLogId: entry.id,
+    applyTimer: null,
+    revertTimer: null,
+    applied: false
+  };
+  activeEffects.set(effect.id, effect);
+  if (effect.delayMs > 0) {
+    effect.applyTimer = setTimeout(() => {
+      void applyScheduledEffect(effect.id);
+    }, effect.delayMs);
+  } else {
+    queueMicrotask(() => {
+      void applyScheduledEffect(effect.id);
+    });
+  }
+}
+
+async function clearAllScheduledEffects(status: EventLogStatus = 'skipped'): Promise<void> {
+  const ids = Array.from(activeEffects.keys());
+  for (const id of ids) {
+    await revertScheduledEffect(id, status);
+  }
+}
+
+function scheduleEventLogPersist(): void {
+  if (eventLogWriteTimer) {
+    return;
+  }
+  eventLogWriteTimer = setTimeout(() => {
+    eventLogWriteTimer = null;
+    void persistEventLogNow();
+  }, EVENT_LOG_WRITE_THROTTLE_MS);
+}
+
+function pruneProcessedMessageIds(): void {
+  const cutoff = Date.now() - MESSAGE_ID_TTL_MS;
+  for (const [messageId, seenAt] of processedMessageIds.entries()) {
+    if (seenAt < cutoff) {
+      processedMessageIds.delete(messageId);
+    }
+  }
+}
+
+function hasSeenMessage(messageId: string): boolean {
+  pruneProcessedMessageIds();
+  return processedMessageIds.has(messageId);
+}
+
+function markMessageSeen(messageId: string): void {
+  processedMessageIds.set(messageId, Date.now());
+  pruneProcessedMessageIds();
+}
+
+async function persistEventLogNow(): Promise<void> {
+  const serialized = JSON.stringify(eventLog);
+  if (serialized === lastEventLogSerialized) {
+    return;
+  }
+  lastEventLogSerialized = serialized;
+  await chrome.storage.local.set({
+    [EVENT_LOG_STORAGE_KEY]: eventLog,
+    [EVENT_LOG_UPDATED_AT_KEY]: Date.now()
+  });
+}
+
+function appendEventLogEntry(entry: EventLogEntry): EventLogEntry {
+  eventLog = [entry, ...eventLog].slice(0, EVENT_LOG_LIMIT);
+  scheduleEventLogPersist();
+  return entry;
+}
+
+function updateEventLogEntry(
+  id: string,
+  updates: Partial<EventLogEntry>,
+  actionUpdater?: (actions: EventLogAction[]) => EventLogAction[]
+): void {
+  let changed = false;
+  eventLog = eventLog.map((entry) => {
+    if (entry.id !== id) {
+      return entry;
+    }
+    const nextActions = actionUpdater ? actionUpdater(entry.actions) : entry.actions;
+    const nextEntry: EventLogEntry = {
+      ...entry,
+      ...updates,
+      actions: nextActions
+    };
+    if (!valuesEqual(entry, nextEntry)) {
+      changed = true;
+      return nextEntry;
+    }
+    return entry;
+  });
+  if (changed) {
+    scheduleEventLogPersist();
+  }
+}
 async function startEventSub(): Promise<void> {
   if (!twitchAuth) {
     throw new Error('Not authenticated with Twitch');
@@ -875,11 +1522,11 @@ function scheduleChannelRewardRefresh(delayMs = CHANNEL_REWARD_REFRESH_INTERVAL_
   }
   channelRewardTimer = setTimeout(() => {
     channelRewardTimer = null;
-    void refreshChannelPointRewards();
+    void refreshChannelRewards();
   }, Math.max(0, delayMs));
 }
 
-async function refreshChannelPointRewards(): Promise<void> {
+async function refreshChannelRewards(): Promise<void> {
   if (!twitchAuth || channelRewardFetchInFlight) {
     return;
   }
@@ -897,14 +1544,19 @@ async function refreshChannelPointRewards(): Promise<void> {
     const rewards: ChannelPointRewardSummary[] = (body.data ?? [])
       .map((reward) => ({
         id: reward.id,
-        title: reward.title?.trim() || reward.prompt?.trim() || reward.id
+        title: reward.title?.trim() || reward.prompt?.trim() || reward.id,
+        cost: typeof (reward as any).cost === 'number' ? (reward as any).cost : null
       }))
       .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: 'base' }));
 
     channelRewardLastFetchedAt = Date.now();
-    const current = cachedState.channelPointRewards ?? [];
-    if (JSON.stringify(current) !== JSON.stringify(rewards)) {
+    if (!valuesEqual(channelRewards, rewards)) {
+      channelRewards = rewards;
       await updateCachedState({ channelPointRewards: rewards });
+      await chrome.storage.local.set({
+        [CHANNEL_REWARDS_STORAGE_KEY]: rewards,
+        [CHANNEL_REWARDS_UPDATED_AT_KEY]: Date.now()
+      });
     }
   } catch (error) {
     console.warn('[background] Failed to refresh channel point rewards', error);
@@ -938,6 +1590,7 @@ function cleanupEventSub(options: { resetBackoff?: boolean } = {}): void {
   if (resetBackoff) {
     reconnectBackoffMs = INITIAL_BACKOFF_MS;
   }
+  void clearAllScheduledEffects('skipped');
   updateDiagnostics({ websocketConnected: false, sessionId: null, subscriptions: 0 });
 }
 
@@ -958,7 +1611,7 @@ function handleEventSubMessage(raw: string): void {
       recordKeepalive();
       break;
     case 'notification':
-      handleNotification(parsed?.payload);
+      handleNotification(parsed?.payload, parsed?.metadata);
       break;
     case 'session_reconnect':
       handleSessionReconnect(parsed?.payload);
@@ -1002,7 +1655,7 @@ function recordKeepalive(): void {
   }
 }
 
-function handleNotification(payload: any): void {
+function handleNotification(payload: any, metadata: any): void {
   const subscriptionType: string = payload?.subscription?.type ?? 'unknown';
   const bindingType = mapSubscriptionToBinding(subscriptionType);
   updateDiagnostics({
@@ -1018,7 +1671,8 @@ function handleNotification(payload: any): void {
     subscriptionType,
     bindingType,
     receivedAt: Date.now(),
-    payload: payload?.event
+    payload: payload?.event,
+    messageId: String(metadata?.message_id ?? crypto.randomUUID())
   });
 }
 
@@ -1209,6 +1863,8 @@ function mapSubscriptionToBinding(type: string): BindingEventType | null {
       return 'bits';
     case 'channel.subscribe':
       return 'sub';
+    case 'channel.subscription.gift':
+      return 'gift_sub';
     case 'channel.follow':
       return 'follow';
     default:
@@ -1218,19 +1874,35 @@ function mapSubscriptionToBinding(type: string): BindingEventType | null {
 const TEST_EVENT_SUBSCRIPTION_MAP: Record<TestEventType, string> = {
   channel_points: 'channel.channel_points_custom_reward_redemption.add',
   bits: 'channel.cheer',
-  gift_sub: 'channel.subscribe',
+  gift_sub: 'channel.subscription.gift',
   sub: 'channel.subscribe',
   follow: 'channel.follow'
 };
 
 function routeEvent(event: RoutedEvent): void {
   updateDiagnostics({ lastNotificationAt: event.receivedAt, lastNotificationType: event.subscriptionType });
-  if (!cachedState.captureEvents) {
-    console.info('[background] Capture disabled; ignoring event', event.subscriptionType);
+  if (event.source === 'eventsub') {
+    if (hasSeenMessage(event.messageId)) {
+      return;
+    }
+    markMessageSeen(event.messageId);
+  }
+  const normalized = normalizeEvent(event.bindingType, event.payload, event.subscriptionType);
+  if (!normalized) {
     return;
   }
-  console.info('[background] Routed event', event.subscriptionType, event.payload);
-  // Phase 4 will map events to bindings; for now this is a placeholder.
+  if (!cachedState.captureEvents) {
+    logSkippedEvent(normalized, event.bindingType, event.source, 'capture_disabled');
+    return;
+  }
+  const matches = matchBindings(normalized, event.bindingType);
+  if (matches.length === 0) {
+    logSkippedEvent(normalized, event.bindingType, event.source, 'no_matching_bindings');
+    return;
+  }
+  for (const match of matches) {
+    void queueEffect(match.binding, normalized, event.bindingType, match.operations, event.source);
+  }
 }
 
 async function handleTestEvent(payload: {
@@ -1241,14 +1913,53 @@ async function handleTestEvent(payload: {
   subTier: SubTier;
 }): Promise<'processed' | 'ignored'> {
   const subscriptionType = TEST_EVENT_SUBSCRIPTION_MAP[payload.type];
+  const syntheticPayload = buildTestEventPayload(payload);
   routeEvent({
     source: 'test',
     subscriptionType,
     bindingType: payload.type,
     receivedAt: Date.now(),
-    payload
+    payload: syntheticPayload,
+    messageId: `test-${Date.now()}-${Math.random().toString(16).slice(2)}`
   });
   return cachedState.captureEvents ? 'processed' : 'ignored';
+}
+
+function buildTestEventPayload(payload: {
+  type: TestEventType;
+  username: string;
+  amount: number | null;
+  rewardId: string | null;
+  subTier: SubTier;
+}): unknown {
+  switch (payload.type) {
+    case 'channel_points': {
+      const rewardId = payload.rewardId ?? '';
+      const reward = channelRewards.find((item) => item.id === rewardId);
+      return {
+        user_name: payload.username,
+        reward: {
+          id: payload.rewardId,
+          title: reward?.title ?? rewardId,
+          cost: reward?.cost ?? null
+        }
+      };
+    }
+    case 'bits':
+      return { user_name: payload.username, bits: payload.amount ?? 0 };
+    case 'gift_sub':
+      return {
+        user_name: payload.username,
+        tier: mapSubTierToTier(payload.subTier),
+        is_gift: true,
+        total: payload.amount ?? 1
+      };
+    case 'sub':
+      return { user_name: payload.username, tier: mapSubTierToTier(payload.subTier), is_gift: false };
+    case 'follow':
+    default:
+      return { user_name: payload.username };
+  }
 }
 
 async function ensureFreshAuth(): Promise<boolean> {
@@ -1266,6 +1977,22 @@ type ActionResult = {
   messageKey?: string;
   messageParams?: Record<string, string | number>;
 };
+
+async function handleManualRewardRefresh(): Promise<ActionResult> {
+  if (!twitchAuth) {
+    return { status: 'error', messageKey: 'toasts.rewardsRefreshAuth' };
+  }
+  const now = Date.now();
+  if (channelRewardFetchInFlight) {
+    return { status: 'error', messageKey: 'toasts.rewardsRefreshPending' };
+  }
+  if (now - lastManualRewardRefreshAt < REWARD_REFRESH_DEBOUNCE_MS) {
+    return { status: 'error', messageKey: 'toasts.rewardsRefreshTooSoon' };
+  }
+  lastManualRewardRefreshAt = now;
+  await refreshChannelRewards();
+  return { status: 'ok', messageKey: 'toasts.rewardsRefreshed' };
+}
 
 async function initiateConnect(): Promise<ActionResult> {
   try {
@@ -1314,6 +2041,15 @@ async function disconnectFromTwitch(): Promise<ActionResult> {
   channelRewardLastFetchedAt = 0;
   channelRewardFetchInFlight = false;
   subscriptionRetryBlocked = false;
+  channelRewards = [];
+  await chrome.storage.local.set({
+    [CHANNEL_REWARDS_STORAGE_KEY]: [],
+    [CHANNEL_REWARDS_UPDATED_AT_KEY]: Date.now()
+  });
+  await clearAllScheduledEffects('skipped');
+  effectAdjustments = { semitoneOffset: 0, speedPercent: 0 };
+  await chrome.storage.local.set({ [EFFECT_STORAGE_KEY]: effectAdjustments });
+  await updateCachedState({ effectSemitoneOffset: 0, effectSpeedPercent: 0 });
   if (cachedState.channelPointRewards?.length) {
     await updateCachedState({ channelPointRewards: [] });
   }
@@ -1383,6 +2119,11 @@ async function handlePopupMessage(
       sendActionResponse(sendResponse, result);
       return;
     }
+    case 'POPUP_REFRESH_REWARDS': {
+      const result = await handleManualRewardRefresh();
+      sendActionResponse(sendResponse, result);
+      return;
+    }
     case 'POPUP_TRIGGER_TEST_EVENT': {
       const status = await handleTestEvent(message.payload);
       const result: ActionResult =
@@ -1397,16 +2138,32 @@ async function handlePopupMessage(
   }
 }
 
-function handleContentMessage(message: ContentToBackgroundMessage): void {
+function handleContentMessage(message: ContentToBackgroundMessage, sender?: chrome.runtime.MessageSender): void {
   switch (message.type) {
     case 'CONTENT_READY':
       console.info('[background] Content script is ready');
+      if (sender?.tab?.id != null) {
+        activeContentTabId = sender.tab.id;
+      }
       break;
     case 'CONTENT_PONG':
       console.debug('[background] Received pong from content script');
       break;
     case 'AUDIO_STATUS':
       console.debug('[background] Audio status update', message.status);
+      break;
+    case 'AUDIO_EFFECTS_UPDATE':
+      effectAdjustments = {
+        semitoneOffset: message.payload.semitoneOffset,
+        speedPercent: message.payload.speedPercent
+      };
+      void updateCachedState(
+        {
+          effectSemitoneOffset: message.payload.semitoneOffset,
+          effectSpeedPercent: message.payload.speedPercent
+        },
+        { persist: true, broadcast: true }
+      );
       break;
     default:
       break;
@@ -1428,10 +2185,34 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   }
 
   if (isContentMessage(message)) {
-    handleContentMessage(message);
+    handleContentMessage(message, _sender);
   }
 
   return false;
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') {
+    return;
+  }
+  if (CHANNEL_REWARDS_STORAGE_KEY in changes) {
+    const next = (changes as any)[CHANNEL_REWARDS_STORAGE_KEY]?.newValue as ChannelPointRewardSummary[] | undefined;
+    if (next && !valuesEqual(channelRewards, next)) {
+      channelRewards = next;
+      void updateCachedState({ channelPointRewards: next });
+    }
+  }
+  if (EFFECT_STORAGE_KEY in changes) {
+    const next = (changes as any)[EFFECT_STORAGE_KEY]?.newValue;
+    void updateEffectAdjustmentsFromStorageValue(next);
+  }
+  if (EVENT_LOG_STORAGE_KEY in changes) {
+    const next = (changes as any)[EVENT_LOG_STORAGE_KEY]?.newValue as EventLogEntry[] | undefined;
+    if (Array.isArray(next) && !valuesEqual(eventLog, next)) {
+      eventLog = next.slice(0, EVENT_LOG_LIMIT);
+      lastEventLogSerialized = JSON.stringify(eventLog);
+    }
+  }
 });
 
 export function dispatchAudioCommand(tabId: number, message: BackgroundToContentMessage): void {
