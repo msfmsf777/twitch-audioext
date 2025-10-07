@@ -8,7 +8,9 @@ d service worker.
 
 ```bash
 npm install
-TWITCH_CLIENT_ID=your_client_id npm run build
+
+$env:TWITCH_CLIENT_ID="o9c3l0dqqadjyvgmdjqrojmwil3q1v"
+npm run build
 ```
 
 The build script bundles the background service worker, popup, and content script into `dist/` and copies the MV3 manifest plus
