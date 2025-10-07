@@ -6,7 +6,8 @@ export const TWITCH_REQUIRED_SCOPES = [
   'channel:read:redemptions',
   'bits:read',
   'channel:read:subscriptions',
-  'moderator:read:followers'
+  'moderator:read:followers',
+  'user:write:chat'
 ] as const;
 
 export type TwitchScope = (typeof TWITCH_REQUIRED_SCOPES)[number];
@@ -80,6 +81,11 @@ export function getRequiredEventSubDefinitions(
     },
     {
       type: 'channel.subscribe',
+      version: '1',
+      condition: { broadcaster_user_id: broadcasterUserId }
+    },
+    {
+      type: 'channel.subscription.gift',
       version: '1',
       condition: { broadcaster_user_id: broadcasterUserId }
     },

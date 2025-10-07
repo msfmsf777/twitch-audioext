@@ -17,6 +17,7 @@ export type SubTier = 'tier1' | 'tier2' | 'tier3';
 export interface ChannelPointRewardSummary {
   id: string;
   title: string;
+  cost?: number | null;
 }
 
 export interface BindingAction {
@@ -81,6 +82,8 @@ export interface PopupPersistentState {
   language: string;
   semitoneOffset: number;
   speedPercent: number;
+  effectSemitoneOffset: number;
+  effectSpeedPercent: number;
   captureEvents: boolean;
   loggedIn: boolean;
   twitchDisplayName: string | null;
@@ -88,6 +91,7 @@ export interface PopupPersistentState {
   testEvents: TestEventsState;
   bindings: BindingDefinition[];
   diagnosticsExpanded: boolean;
+  eventLogExpanded: boolean;
 }
 
 export const POPUP_STATE_STORAGE_KEY = 'popupState';
@@ -97,6 +101,8 @@ export function createDefaultPopupState(): PopupPersistentState {
     language: 'en',
     semitoneOffset: 0,
     speedPercent: 100,
+    effectSemitoneOffset: 0,
+    effectSpeedPercent: 0,
     captureEvents: false,
     loggedIn: false,
     twitchDisplayName: null,
@@ -109,6 +115,7 @@ export function createDefaultPopupState(): PopupPersistentState {
       subTier: 'tier1'
     },
     bindings: [],
-    diagnosticsExpanded: false
+    diagnosticsExpanded: false,
+    eventLogExpanded: false
   };
 }

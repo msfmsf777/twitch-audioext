@@ -6,8 +6,10 @@ import {
   type BindingEventType,
   type PopupPersistentState,
   type SubTier,
-  type TestEventType
+  type TestEventType,
+  type ChannelPointRewardSummary
 } from '../shared/state';
+import type { EventLogEntry, EventLogAction } from '../shared/event-log';
 import { createEmptyDiagnostics, type TwitchDiagnosticsSnapshot } from '../shared/twitch';
 
 const appRoot = document.getElementById('app');
@@ -170,6 +172,9 @@ class PopupApp {
     outsideListener: (event: MouseEvent) => void;
   } | null = null;
   private diagnostics: TwitchDiagnosticsSnapshot = createEmptyDiagnostics();
+  private channelRewards: ChannelPointRewardSummary[] = [];
+  private eventLog: EventLogEntry[] = [];
+  private eventLogUpdatedAt = 0;
 
   constructor(private readonly root: HTMLElement) {
     this.toast = new ToastManager(root);
@@ -179,6 +184,37 @@ class PopupApp {
         return;
       }
       this.handleBackgroundPush(message as BackgroundToPopupMessage);
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'local') {
+        return;
+      }
+      if ('channelRewards' in changes) {
+        const next = (changes as any).channelRewards?.newValue as ChannelPointRewardSummary[] | undefined;
+        if (Array.isArray(next) && !this.equalRewards(next)) {
+          this.channelRewards = next;
+          this.handleRewardSelectionChange();
+          this.render();
+        }
+      }
+      if ('eventLog' in changes) {
+        const next = (changes as any).eventLog?.newValue as EventLogEntry[] | undefined;
+        if (Array.isArray(next)) {
+          this.eventLog = next;
+          const updated = (changes as any).eventLogUpdatedAt?.newValue as number | undefined;
+          if (typeof updated === 'number') {
+            this.eventLogUpdatedAt = updated;
+          }
+          this.renderEventLogPanel();
+        }
+      }
+      if ('eventLogUpdatedAt' in changes && !(changes as any).eventLog) {
+        const updated = (changes as any).eventLogUpdatedAt?.newValue as number | undefined;
+        if (typeof updated === 'number') {
+          this.eventLogUpdatedAt = updated;
+          this.renderEventLogPanel();
+        }
+      }
     });
   }
 
@@ -191,6 +227,7 @@ class PopupApp {
       this.state = { ...this.state, language: activeLanguage };
       void this.persistState();
     }
+    await this.loadSharedData();
     i18n.onChange((code) => {
       if (this.state.language !== code) {
         this.state = { ...this.state, language: code };
@@ -211,11 +248,79 @@ class PopupApp {
     return createDefaultPopupState();
   }
 
+  private async loadSharedData(): Promise<void> {
+    const data = await new Promise<Record<string, unknown>>((resolve) => {
+      chrome.storage.local.get(['channelRewards', 'eventLog', 'eventLogUpdatedAt'], (result) => {
+        resolve(result);
+      });
+    });
+    const rewards = data.channelRewards;
+    if (Array.isArray(rewards)) {
+      this.channelRewards = rewards as ChannelPointRewardSummary[];
+    }
+    const log = data.eventLog;
+    if (Array.isArray(log)) {
+      this.eventLog = log as EventLogEntry[];
+    }
+    const updated = data.eventLogUpdatedAt;
+    if (typeof updated === 'number') {
+      this.eventLogUpdatedAt = updated;
+    }
+    this.handleRewardSelectionChange();
+  }
+
   private async persistState(): Promise<void> {
     const response = await sendPopupMessage({ type: 'POPUP_UPDATE_STATE', state: this.state });
     if (response?.type === 'BACKGROUND_STATE') {
       this.state = response.state;
     }
+  }
+
+  private equalRewards(next: ChannelPointRewardSummary[]): boolean {
+    if (this.channelRewards.length !== next.length) {
+      return false;
+    }
+    for (let index = 0; index < next.length; index += 1) {
+      const current = this.channelRewards[index];
+      const candidate = next[index];
+      if (!current || current.id !== candidate.id) {
+        return false;
+      }
+      if (current.title !== candidate.title) {
+        return false;
+      }
+      const currentCost = current.cost ?? null;
+      const candidateCost = candidate.cost ?? null;
+      if (currentCost !== candidateCost) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private handleRewardSelectionChange(): void {
+    const availableIds = new Set(this.channelRewards.map((reward) => reward.id));
+    if (this.state.testEvents.channelPointsRewardId && !availableIds.has(this.state.testEvents.channelPointsRewardId)) {
+      const nextId = this.channelRewards[0]?.id ?? null;
+      this.updateTestEvents({ channelPointsRewardId: nextId }, { rerender: false });
+    }
+    if (this.bindingDraft && this.bindingDraft.eventType === 'channel_points') {
+      if (!this.bindingDraft.channelPointsRewardId || !availableIds.has(this.bindingDraft.channelPointsRewardId)) {
+        this.bindingDraft = { ...this.bindingDraft, channelPointsRewardId: this.channelRewards[0]?.id ?? null };
+      }
+    }
+  }
+
+  private renderEventLogPanel(): void {
+    if (this.view !== 'main') {
+      return;
+    }
+    const container = this.root.querySelector('.event-log');
+    if (!container) {
+      return;
+    }
+    container.outerHTML = this.renderEventLogBlock();
+    this.bindEventLogControls();
   }
 
   private persistDiagnostics(expanded: boolean): void {
@@ -503,7 +608,7 @@ class PopupApp {
   }
 
   private formatSemitoneValue(): string {
-    const value = this.state.semitoneOffset;
+    const value = this.state.semitoneOffset + this.state.effectSemitoneOffset;
     if (value > 0) {
       return `+${value}`;
     }
@@ -514,7 +619,17 @@ class PopupApp {
   }
 
   private formatSpeedValue(): string {
-    return `${this.state.speedPercent}%`;
+    const value = this.state.speedPercent + this.state.effectSpeedPercent;
+    return `${value}%`;
+  }
+
+  private escapeHtml(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   private getTwitchConnectionState(): {
@@ -776,6 +891,16 @@ class PopupApp {
     this.render();
   }
 
+  private toggleEventLog(): void {
+    this.state = { ...this.state, eventLogExpanded: !this.state.eventLogExpanded };
+    void this.persistState();
+    this.renderEventLogPanel();
+  }
+
+  private async handleRefreshRewards(): Promise<void> {
+    await this.runAction({ type: 'POPUP_REFRESH_REWARDS' });
+  }
+
   private async handleFireTest(): Promise<void> {
     if (!this.state.loggedIn) {
       return;
@@ -907,6 +1032,7 @@ class PopupApp {
           ${this.renderTwitchSection()}
           ${this.renderBindingsEntry(connection.connected)}
           ${this.renderTestEventsBlock()}
+          ${this.renderEventLogBlock()}
         </main>
         ${this.renderDiagnosticsPanel()}
       </div>
@@ -1070,6 +1196,16 @@ class PopupApp {
             ?
           </button>
         </div>
+        <div class="twitch-card__row twitch-card__row--refresh">
+          <button
+            type="button"
+            class="btn btn--ghost"
+            data-action="refresh-rewards"
+            ${this.state.loggedIn ? '' : 'disabled'}
+          >
+            ${i18n.t('twitch.refreshRewards')}
+          </button>
+        </div>
       </section>
     `;
   }
@@ -1096,12 +1232,21 @@ class PopupApp {
         ? i18n.t('testEvents.amountBitsPlaceholder')
         : i18n.t('testEvents.amountGiftPlaceholder');
 
+    const rewardOptions = this.channelRewards
+      .map((reward) => {
+        const label = reward.cost != null ? `${reward.title} (${reward.cost})` : reward.title;
+        const selected = testEvents.channelPointsRewardId === reward.id ? 'selected' : '';
+        return `<option value="${reward.id}" ${selected}>${label}</option>`;
+      })
+      .join('');
+    const rewardDisabled = this.channelRewards.length === 0 ? 'disabled' : '';
     const rewardField = needsReward
       ? `
           <label class="field field--compact">
             <span>${i18n.t('testEvents.reward')}</span>
-            <select name="test-event-reward">
+            <select name="test-event-reward" ${rewardDisabled}>
               <option value="">${i18n.t('testEvents.rewardPlaceholder')}</option>
+              ${rewardOptions}
             </select>
           </label>
         `
@@ -1171,6 +1316,196 @@ class PopupApp {
     `;
   }
 
+  private renderEventLogBlock(): string {
+    const count = this.eventLog.length;
+    const lastTime = this.eventLogUpdatedAt || (this.eventLog[0]?.ts ?? null);
+    const summary = i18n.t('eventLog.summary', {
+      count,
+      time: this.formatRelativeTime(lastTime)
+    });
+    const toggle = `
+      <button class="event-log__toggle" data-action="toggle-event-log">
+        ${summary}
+      </button>
+    `;
+    if (!this.state.eventLogExpanded) {
+      return `
+        <section class="event-log" aria-label="${i18n.t('eventLog.title')}">
+          ${toggle}
+        </section>
+      `;
+    }
+    const entries = count
+      ? this.eventLog.map((entry) => this.renderEventLogEntry(entry)).join('')
+      : `<p class="event-log__empty">${i18n.t('eventLog.empty')}</p>`;
+    return `
+      <section class="event-log event-log--open" aria-label="${i18n.t('eventLog.title')}">
+        ${toggle}
+        <div class="event-log__body">
+          ${entries}
+        </div>
+      </section>
+    `;
+  }
+
+  private renderEventLogEntry(entry: EventLogEntry): string {
+    const summary = this.getEventSummary(entry);
+    const statusLabel = this.getEventStatusLabel(entry.status);
+    const statusClass = `event-log__status event-log__status--${entry.status}`;
+    const relative = this.formatRelativeTime(entry.ts);
+    const bindings = entry.matchedBindings.length
+      ? entry.matchedBindings.map((binding) => this.escapeHtml(binding.label)).join(', ')
+      : i18n.t('eventLog.none');
+    const actions = this.formatEventActions(entry.actions);
+    const delay = entry.delaySec != null ? `<li>${i18n.t('eventLog.delay', { seconds: entry.delaySec })}</li>` : '';
+    const duration = entry.durationSec != null ? `<li>${i18n.t('eventLog.duration', { seconds: entry.durationSec })}</li>` : '';
+    const note = entry.note ? `<li>${this.escapeHtml(entry.note)}</li>` : '';
+    return `
+      <details class="event-log__entry">
+        <summary>
+          <span class="event-log__summary-main">${summary}</span>
+          <span class="${statusClass}">${statusLabel}</span>
+          <span class="event-log__time">${relative}</span>
+        </summary>
+        <div class="event-log__details">
+          <ul>
+            <li>${i18n.t('eventLog.bindings')}: ${bindings}</li>
+            <li>${i18n.t('eventLog.actions')}: ${actions || i18n.t('eventLog.none')}</li>
+            ${delay}
+            ${duration}
+            ${note}
+          </ul>
+        </div>
+      </details>
+    `;
+  }
+
+  private getEventSummary(entry: EventLogEntry): string {
+    const type = this.getEventTypeLabel(entry.eventType);
+    const user = entry.userDisplay ? this.escapeHtml(entry.userDisplay) : i18n.t('eventLog.unknownUser');
+    const detail = this.getEventDetail(entry);
+    return `${type} — ${user}${detail ? ` • ${detail}` : ''}`;
+  }
+
+  private getEventDetail(entry: EventLogEntry): string | null {
+    switch (entry.eventType) {
+      case 'channel_points':
+        if (entry.reward) {
+          const title = this.escapeHtml(entry.reward.title);
+          return entry.reward.cost != null ? `${title} (${entry.reward.cost})` : title;
+        }
+        return null;
+      case 'cheer':
+        if (entry.bitsAmount != null) {
+          return i18n.t('eventLog.bitsAmount', { amount: entry.bitsAmount });
+        }
+        return null;
+      case 'sub':
+        if (entry.subTier) {
+          return i18n.t('eventLog.subTier', { tier: this.formatSubTier(entry.subTier) });
+        }
+        return null;
+      case 'gift_sub':
+        if (entry.giftAmount != null) {
+          return i18n.t('eventLog.giftAmount', { amount: entry.giftAmount });
+        }
+        return null;
+      default:
+        return null;
+    }
+  }
+
+  private getEventTypeLabel(type: EventLogEntry['eventType']): string {
+    switch (type) {
+      case 'channel_points':
+        return i18n.t('eventLog.typeChannelPoints');
+      case 'cheer':
+        return i18n.t('eventLog.typeCheer');
+      case 'sub':
+        return i18n.t('eventLog.typeSub');
+      case 'gift_sub':
+        return i18n.t('eventLog.typeGiftSub');
+      case 'follow':
+        return i18n.t('eventLog.typeFollow');
+      default:
+        return type;
+    }
+  }
+
+  private getEventStatusLabel(status: EventLogEntry['status']): string {
+    switch (status) {
+      case 'queued':
+        return i18n.t('eventLog.statusQueued');
+      case 'applied':
+        return i18n.t('eventLog.statusApplied');
+      case 'reverted':
+        return i18n.t('eventLog.statusReverted');
+      case 'skipped':
+        return i18n.t('eventLog.statusSkipped');
+      case 'error':
+        return i18n.t('eventLog.statusError');
+      default:
+        return status;
+    }
+  }
+
+  private formatEventActions(actions: EventLogAction[]): string {
+    const parts = actions.map((action) => {
+      switch (action.kind) {
+        case 'pitch':
+          return i18n.t('eventLog.actionPitch', { amount: action.semitones });
+        case 'speed':
+          return i18n.t('eventLog.actionSpeed', { amount: action.percent });
+        case 'chat': {
+          if (action.error) {
+            return i18n.t('eventLog.actionChatError');
+          }
+          if (action.sent) {
+            return i18n.t('eventLog.actionChatSent');
+          }
+          return i18n.t('eventLog.actionChatQueued');
+        }
+        default:
+          return '';
+      }
+    });
+    return parts.filter(Boolean).join(', ');
+  }
+
+  private formatSubTier(tier: '1000' | '2000' | '3000'): string {
+    switch (tier) {
+      case '2000':
+        return i18n.t('bindings.subTier2');
+      case '3000':
+        return i18n.t('bindings.subTier3');
+      default:
+        return i18n.t('bindings.subTier1');
+    }
+  }
+
+  private formatRelativeTime(timestamp: number | null): string {
+    if (!timestamp) {
+      return i18n.t('eventLog.never');
+    }
+    const diff = Date.now() - timestamp;
+    if (diff < 1000) {
+      return i18n.t('eventLog.justNow');
+    }
+    const seconds = Math.floor(diff / 1000);
+    if (seconds < 60) {
+      return i18n.t('eventLog.secondsAgo', { seconds });
+    }
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) {
+      return i18n.t('eventLog.minutesAgo', { minutes });
+    }
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) {
+      return i18n.t('eventLog.hoursAgo', { hours });
+    }
+    const days = Math.floor(hours / 24);
+    return i18n.t('eventLog.daysAgo', { days });
+  }
   private renderBindingsEntry(connected: boolean): string {
     const disabled = !connected;
     return `
@@ -1392,11 +1727,20 @@ class PopupApp {
     if (!this.bindingDraft) return '';
     switch (this.bindingDraft.eventType) {
       case 'channel_points':
+        const rewardOptions = this.channelRewards
+          .map((reward) => {
+            const label = reward.cost != null ? `${reward.title} (${reward.cost})` : reward.title;
+            const selected = this.bindingDraft?.channelPointsRewardId === reward.id ? 'selected' : '';
+            return `<option value="${reward.id}" ${selected}>${label}</option>`;
+          })
+          .join('');
+        const rewardDisabled = this.channelRewards.length === 0 ? 'disabled' : '';
         return `
           <label class="field">
             <span class="field__label">${i18n.t('bindings.channelPoints')}</span>
-            <select name="channelReward" disabled>
+            <select name="channelReward" ${rewardDisabled}>
               <option value="">${i18n.t('bindings.rewardsPlaceholder')}</option>
+              ${rewardOptions}
             </select>
           </label>
         `;
@@ -1493,6 +1837,7 @@ class PopupApp {
     const testForm = this.root.querySelector<HTMLFormElement>('[data-role="test-events-form"]');
     const openBindings = this.root.querySelector<HTMLButtonElement>('[data-action="open-bindings"]');
     const diagnosticsToggle = this.root.querySelector<HTMLButtonElement>('[data-action="toggle-diagnostics"]');
+    const refreshButton = this.root.querySelector<HTMLButtonElement>('[data-action="refresh-rewards"]');
 
     transposeSlider?.addEventListener('input', (event) => {
       const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
@@ -1530,6 +1875,9 @@ class PopupApp {
       const checked = (event.target as HTMLInputElement).checked;
       this.toggleCaptureEvents(checked);
     });
+    refreshButton?.addEventListener('click', () => {
+      void this.handleRefreshRewards();
+    });
     if (testForm) {
       this.bindTestEvents(testForm);
     }
@@ -1538,6 +1886,7 @@ class PopupApp {
       openBindings.addEventListener('click', () => this.openBindingsList());
     }
     diagnosticsToggle?.addEventListener('click', () => this.toggleDiagnostics());
+    this.bindEventLogControls();
 
     const transposeEditButton = this.root.querySelector<HTMLButtonElement>('[data-action="transpose-begin-edit"]');
     const speedEditButton = this.root.querySelector<HTMLButtonElement>('[data-action="speed-begin-edit"]');
@@ -1580,6 +1929,11 @@ class PopupApp {
     }
 
     this.focusEditingInput();
+  }
+
+  private bindEventLogControls(): void {
+    const toggle = this.root.querySelector<HTMLButtonElement>('[data-action="toggle-event-log"]');
+    toggle?.addEventListener('click', () => this.toggleEventLog());
   }
 
   private bindTestEvents(form: HTMLFormElement): void {

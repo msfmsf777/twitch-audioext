@@ -16,8 +16,51 @@ let activeState: ActiveAudioState = {
   ttlSeconds: null
 };
 
+const activeEffects = new Map<string, { pitch: number; speed: number }>();
+let lastPublishedEffects = { pitch: 0, speed: 0 };
+
 function postToBackground(message: ContentToBackgroundMessage): void {
   chrome.runtime.sendMessage(message);
+}
+
+async function publishEffectTotals(): Promise<void> {
+  let pitch = 0;
+  let speed = 0;
+  for (const effect of activeEffects.values()) {
+    pitch += effect.pitch;
+    speed += effect.speed;
+  }
+  if (pitch === lastPublishedEffects.pitch && speed === lastPublishedEffects.speed) {
+    return;
+  }
+  lastPublishedEffects = { pitch, speed };
+  await chrome.storage.local.set({
+    effectAdjustments: {
+      semitoneOffset: pitch,
+      speedPercent: speed
+    }
+  });
+  postToBackground({
+    type: 'AUDIO_EFFECTS_UPDATE',
+    payload: { semitoneOffset: pitch, speedPercent: speed }
+  });
+}
+
+function handleEffectApply(payload: {
+  effectId: string;
+  pitch?: { op: 'add' | 'set'; semitones: number } | null;
+  speed?: { op: 'add' | 'set'; percent: number } | null;
+}): void {
+  const pitchAmount = payload.pitch?.semitones ?? 0;
+  const speedAmount = payload.speed?.percent ?? 0;
+  activeEffects.set(payload.effectId, { pitch: pitchAmount, speed: speedAmount });
+  void publishEffectTotals();
+}
+
+function handleEffectRevert(effectId: string): void {
+  if (activeEffects.delete(effectId)) {
+    void publishEffectTotals();
+  }
 }
 
 function handleAudioApply(payload: ActiveAudioState): void {
@@ -60,6 +103,12 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
         break;
       case 'AUDIO_RESET':
         handleAudioReset();
+        break;
+      case 'AUDIO_EFFECT_APPLY':
+        handleEffectApply(message.payload);
+        break;
+      case 'AUDIO_EFFECT_REVERT':
+        handleEffectRevert(message.payload.effectId);
         break;
       case 'PING':
         postToBackground({ type: 'CONTENT_PONG' });
