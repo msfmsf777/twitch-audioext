@@ -162,6 +162,12 @@ class PopupApp {
   private editingValueDraft = '';
   private editingValueInitial: number | null = null;
   private readonly twitchIconUrl = chrome.runtime.getURL('assets/icons/twitch.svg');
+  private deleteConfirm: {
+    id: string;
+    button: HTMLButtonElement;
+    timeoutId: number | null;
+    outsideListener: (event: MouseEvent) => void;
+  } | null = null;
 
   constructor(private readonly root: HTMLElement) {
     this.toast = new ToastManager(root);
@@ -388,7 +394,54 @@ class PopupApp {
     }
   }
 
+  private setDeleteConfirm(button: HTMLButtonElement, id: string): void {
+    this.clearDeleteConfirm();
+    button.textContent = i18n.t('bindings.deleteConfirm');
+    button.classList.add('binding-row__delete--confirm');
+    button.setAttribute('data-confirming', 'true');
+    const doc = this.root.ownerDocument ?? document;
+    const outsideListener = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) {
+        return;
+      }
+      if (target === button) {
+        return;
+      }
+      if (target.closest(`[data-action="delete-binding"][data-binding-id="${id}"]`)) {
+        return;
+      }
+      this.clearDeleteConfirm();
+    };
+    const timeoutId = window.setTimeout(() => this.clearDeleteConfirm(), 3000);
+    this.deleteConfirm = { id, button, timeoutId, outsideListener };
+    window.setTimeout(() => {
+      if (this.deleteConfirm?.id === id) {
+        doc.addEventListener('click', outsideListener);
+      }
+    }, 0);
+  }
+
+  private clearDeleteConfirm(): void {
+    if (!this.deleteConfirm) {
+      return;
+    }
+    const { button, timeoutId, outsideListener } = this.deleteConfirm;
+    const doc = this.root.ownerDocument ?? document;
+    if (timeoutId !== null) {
+      window.clearTimeout(timeoutId);
+    }
+    doc.removeEventListener('click', outsideListener);
+    if (button.isConnected) {
+      button.textContent = i18n.t('bindings.delete');
+      button.classList.remove('binding-row__delete--confirm');
+      button.removeAttribute('data-confirming');
+    }
+    this.deleteConfirm = null;
+  }
+
   private deleteBinding(id: string): void {
+    this.clearDeleteConfirm();
     const bindings = this.state.bindings.filter((entry) => entry.id !== id);
     this.state = { ...this.state, bindings };
     void this.persistState();
@@ -397,6 +450,7 @@ class PopupApp {
   }
 
   private toggleBinding(id: string, enabled: boolean): void {
+    this.clearDeleteConfirm();
     const bindings = this.state.bindings.map((entry) => (entry.id === id ? { ...entry, enabled } : entry));
     this.state = { ...this.state, bindings };
     void this.persistState();
@@ -1103,14 +1157,32 @@ class PopupApp {
       .map(
         (binding) => `
           <div class="binding-row" data-binding-id="${binding.id}">
-            <label class="toggle">
-              <input type="checkbox" data-role="binding-toggle" ${binding.enabled ? 'checked' : ''} />
-              <span class="toggle__label">${binding.label}</span>
+            <label class="toggle binding-row__toggle">
+              <input
+                type="checkbox"
+                data-role="binding-toggle"
+                ${binding.enabled ? 'checked' : ''}
+                aria-label="${i18n.t('bindings.toggleAria', { label: binding.label })}"
+              />
+              <span class="toggle__label visually-hidden">${i18n.t('bindings.toggleLabel')}</span>
             </label>
-            <div class="binding-row__actions">
-              <button class="btn btn--ghost" data-action="delete-binding">${i18n.t('bindings.delete')}</button>
-              <span class="binding-row__chevron">›</span>
-            </div>
+            <button
+              type="button"
+              class="binding-row__main"
+              data-action="open-binding"
+              data-binding-id="${binding.id}"
+            >
+              <span class="binding-row__label">${binding.label}</span>
+              <span class="binding-row__chevron" aria-hidden="true">›</span>
+            </button>
+            <button
+              type="button"
+              class="btn btn--ghost binding-row__delete"
+              data-action="delete-binding"
+              data-binding-id="${binding.id}"
+            >
+              ${i18n.t('bindings.delete')}
+            </button>
           </div>
         `
       )
@@ -1287,6 +1359,7 @@ class PopupApp {
   }
 
   private render(): void {
+    this.clearDeleteConfirm();
     switch (this.view) {
       case 'main':
         this.root.innerHTML = this.buildMainView();
@@ -1467,22 +1540,37 @@ class PopupApp {
       if (!id) return;
       const toggle = row.querySelector<HTMLInputElement>('[data-role="binding-toggle"]');
       const deleteButton = row.querySelector<HTMLButtonElement>('[data-action="delete-binding"]');
+      const openButton = row.querySelector<HTMLButtonElement>('[data-action="open-binding"]');
 
+      toggle?.addEventListener('click', (event) => event.stopPropagation());
       toggle?.addEventListener('change', (event) => {
+        event.stopPropagation();
         const checked = (event.target as HTMLInputElement).checked;
         this.toggleBinding(id, checked);
       });
 
+      if (openButton) {
+        openButton.addEventListener('click', () => {
+          row.classList.remove('binding-row--hover');
+          this.openBindingEditor(id);
+        });
+        openButton.addEventListener('mouseenter', () => row.classList.add('binding-row--hover'));
+        openButton.addEventListener('mouseleave', () => row.classList.remove('binding-row--hover'));
+        openButton.addEventListener('focus', () => row.classList.add('binding-row--hover'));
+        openButton.addEventListener('blur', () => row.classList.remove('binding-row--hover'));
+      }
+
       deleteButton?.addEventListener('click', (event) => {
         event.stopPropagation();
-        this.deleteBinding(id);
-      });
-
-      row.addEventListener('click', (event) => {
-        if ((event.target as HTMLElement).closest('button')) {
+        if (!deleteButton) {
           return;
         }
-        this.openBindingEditor(id);
+        if (this.deleteConfirm?.id === id) {
+          this.clearDeleteConfirm();
+          this.deleteBinding(id);
+        } else {
+          this.setDeleteConfirm(deleteButton, id);
+        }
       });
     });
   }

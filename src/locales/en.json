@@ -75,6 +75,8 @@
     "empty": "No bindings yet.",
     "toggleLabel": "Enabled",
     "delete": "Delete",
+    "deleteConfirm": "Confirm?",
+    "toggleAria": "Enable or disable {label}",
     "unsavedConfirm": "Leave without saving?",
     "unsavedConfirmLeave": "Leave",
     "unsavedConfirmCancel": "Cancel",
