@@ -6,6 +6,7 @@
   "minimum_chrome_version": "116",
   "default_locale": "en",
   "permissions": ["identity", "storage", "scripting", "activeTab"],
+  "host_permissions": ["https://id.twitch.tv/*", "https://api.twitch.tv/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"

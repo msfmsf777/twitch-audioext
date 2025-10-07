@@ -8,6 +8,7 @@ import {
   type SubTier,
   type TestEventType
 } from '../shared/state';
+import { createEmptyDiagnostics, type TwitchDiagnosticsSnapshot } from '../shared/twitch';
 
 const appRoot = document.getElementById('app');
 
@@ -168,10 +169,17 @@ class PopupApp {
     timeoutId: number | null;
     outsideListener: (event: MouseEvent) => void;
   } | null = null;
+  private diagnostics: TwitchDiagnosticsSnapshot = createEmptyDiagnostics();
 
   constructor(private readonly root: HTMLElement) {
     this.toast = new ToastManager(root);
     this.confirmDialog = new ConfirmDialog(root);
+    chrome.runtime.onMessage.addListener((message) => {
+      if (typeof message !== 'object' || message === null || !('type' in message)) {
+        return;
+      }
+      this.handleBackgroundPush(message as BackgroundToPopupMessage);
+    });
   }
 
   async init(): Promise<void> {
@@ -217,6 +225,32 @@ class PopupApp {
         this.state = { ...this.state, diagnosticsExpanded: response.expanded };
       }
     });
+  }
+
+  private handleBackgroundPush(message: BackgroundToPopupMessage): void {
+    switch (message.type) {
+      case 'BACKGROUND_STATE':
+        this.state = message.state;
+        this.render();
+        break;
+      case 'BACKGROUND_DEVTOOLS':
+        this.state = { ...this.state, diagnosticsExpanded: message.expanded };
+        this.render();
+        break;
+      case 'BACKGROUND_DIAGNOSTICS':
+        this.diagnostics = message.diagnostics;
+        this.updateDiagnosticsPanel();
+        break;
+      default:
+        break;
+    }
+  }
+
+  private updateDiagnosticsPanel(): void {
+    const body = this.root.querySelector<HTMLDivElement>('.diagnostics__body');
+    if (body) {
+      body.innerHTML = this.renderDiagnosticsContent();
+    }
   }
 
   private setView(view: PopupView): void {
@@ -703,16 +737,34 @@ class PopupApp {
     i18n.setActiveCode(code);
   }
 
-  private stubTwitchButton(): void {
-    if (this.state.loggedIn) {
-      this.state = { ...this.state, loggedIn: false };
-    } else if (this.state.twitchDisplayName) {
-      this.state = { ...this.state, loggedIn: true };
-    } else {
-      this.state = { ...this.state, loggedIn: true, twitchDisplayName: 'SampleStreamer' };
+  private async runAction(message: PopupToBackgroundMessage): Promise<void> {
+    const response = await sendPopupMessage(message);
+    if (!response) {
+      return;
     }
-    this.render();
-    void this.persistState();
+    if (response.type === 'BACKGROUND_ACTION_RESULT') {
+      if (response.state) {
+        this.state = response.state;
+        this.render();
+      }
+      if (response.messageKey) {
+        this.toast.show(i18n.t(response.messageKey, response.messageParams ?? {}));
+      }
+    } else if (response.type === 'BACKGROUND_STATE') {
+      this.state = response.state;
+      this.render();
+    }
+  }
+
+  private async handleTwitchButton(): Promise<void> {
+    const meta = this.getTwitchConnectionState();
+    if (meta.connected) {
+      await this.runAction({ type: 'POPUP_TWITCH_DISCONNECT' });
+    } else if (this.state.twitchDisplayName) {
+      await this.runAction({ type: 'POPUP_TWITCH_RECONNECT' });
+    } else {
+      await this.runAction({ type: 'POPUP_TWITCH_CONNECT' });
+    }
   }
 
   private toggleCaptureEvents(enabled: boolean): void {
@@ -724,7 +776,7 @@ class PopupApp {
     this.render();
   }
 
-  private handleFireTest(): void {
+  private async handleFireTest(): Promise<void> {
     if (!this.state.loggedIn) {
       return;
     }
@@ -767,8 +819,7 @@ class PopupApp {
       rewardId: testEvents.channelPointsRewardId,
       subTier: testEvents.subTier
     };
-    console.info('[popup] Test event payload', payload);
-    this.toast.show(i18n.t('toasts.testFired'));
+    await this.runAction({ type: 'POPUP_TRIGGER_TEST_EVENT', payload });
   }
 
   private insertUserTemplate(): void {
@@ -1146,10 +1197,45 @@ class PopupApp {
       <section class="diagnostics ${this.state.diagnosticsExpanded ? 'diagnostics--open' : ''}">
         <button class="diagnostics__toggle" data-action="toggle-diagnostics">${i18n.t('app.diagnostics')}</button>
         <div class="diagnostics__body">
-          <pre>${JSON.stringify(this.state, null, 2)}</pre>
+          ${this.renderDiagnosticsContent()}
         </div>
       </section>
     `;
+  }
+
+  private renderDiagnosticsContent(): string {
+    const diag = this.diagnostics;
+    const connected = diag.websocketConnected ? i18n.t('diagnostics.yes') : i18n.t('diagnostics.no');
+    const session = diag.sessionId ? diag.sessionId.slice(0, 8) : i18n.t('diagnostics.unknown');
+    const subs = diag.subscriptions.toString();
+    const keepalive = this.formatDiagnosticsTime(diag.lastKeepaliveAt);
+    const lastNotification = this.formatDiagnosticsTime(diag.lastNotificationAt);
+    const notificationType = diag.lastNotificationType ?? i18n.t('diagnostics.unknown');
+    const lastError = diag.lastError ?? i18n.t('diagnostics.none');
+
+    return `
+      <dl class="diagnostics__grid">
+        <div><dt>${i18n.t('diagnostics.wsConnected')}</dt><dd>${connected}</dd></div>
+        <div><dt>${i18n.t('diagnostics.sessionId')}</dt><dd>${session}</dd></div>
+        <div><dt>${i18n.t('diagnostics.subscriptions')}</dt><dd>${subs}</dd></div>
+        <div><dt>${i18n.t('diagnostics.lastKeepalive')}</dt><dd>${keepalive}</dd></div>
+        <div><dt>${i18n.t('diagnostics.lastNotification')}</dt><dd>${lastNotification}</dd></div>
+        <div><dt>${i18n.t('diagnostics.lastNotificationType')}</dt><dd>${notificationType}</dd></div>
+        <div><dt>${i18n.t('diagnostics.lastError')}</dt><dd>${lastError}</dd></div>
+      </dl>
+    `;
+  }
+
+  private formatDiagnosticsTime(value: number | null): string {
+    if (!value) {
+      return i18n.t('diagnostics.unknown');
+    }
+    try {
+      return new Date(value).toLocaleTimeString();
+    } catch (error) {
+      console.warn('[popup] Failed to format diagnostics time', error);
+      return value.toString();
+    }
   }
 
   private buildBindingsListView(): string {
@@ -1424,7 +1510,9 @@ class PopupApp {
         if (code) this.selectLanguage(code);
       })
     );
-    twitchButton?.addEventListener('click', () => this.stubTwitchButton());
+    twitchButton?.addEventListener('click', () => {
+      void this.handleTwitchButton();
+    });
     captureToggle?.addEventListener('change', (event) => {
       const checked = (event.target as HTMLInputElement).checked;
       this.toggleCaptureEvents(checked);
@@ -1522,7 +1610,7 @@ class PopupApp {
 
     form.addEventListener('submit', (event) => {
       event.preventDefault();
-      this.handleFireTest();
+      void this.handleFireTest();
     });
   }
 
