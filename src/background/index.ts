@@ -14,7 +14,9 @@ import {
 } from '../shared/state';
 import { loadFromStorage, removeFromStorage, saveToStorage } from '../shared/storage';
 import {
+  TWITCH_AUTH_BASE,
   TWITCH_AUTH_STORAGE_KEY,
+  TWITCH_LEGACY_AUTH_STORAGE_KEYS,
   TWITCH_CLIENT_ID,
   TWITCH_EVENTSUB_WS,
   TWITCH_HELIX_BASE,
@@ -56,6 +58,14 @@ interface HelixSubscription {
   };
 }
 
+interface OAuthValidateResponse {
+  client_id: string;
+  login: string;
+  scopes: string[];
+  user_id: string;
+  expires_in: number;
+}
+
 class MissingClientIdError extends Error {
   constructor() {
     super('Missing Twitch client ID');
@@ -77,6 +87,17 @@ class AuthCancelledError extends Error {
   }
 }
 
+class TokenValidationError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly body: unknown,
+    message = 'Token validation failed'
+  ) {
+    super(message);
+    this.name = 'TokenValidationError';
+  }
+}
+
 let cachedState: PopupPersistentState = createDefaultPopupState();
 let twitchAuth: TwitchAuthData | null = null;
 let diagnostics: TwitchDiagnosticsSnapshot = createEmptyDiagnostics();
@@ -87,21 +108,85 @@ let eventSubReconnectTimer: TimeoutHandle | null = null;
 let keepaliveTimer: TimeoutHandle | null = null;
 let keepaliveTimeoutMs = 0;
 let reconnectBackoffMs = INITIAL_BACKOFF_MS;
+
+function getAuthExpiry(auth: TwitchAuthData): number {
+  return auth.obtainedAt + auth.expiresIn * 1000;
+}
+
+function getAuthRemainingMs(auth: TwitchAuthData): number {
+  return Math.max(0, getAuthExpiry(auth) - Date.now());
+}
+
+async function migrateLegacyAuthStorage(): Promise<void> {
+  const existing = await loadFromStorage(TWITCH_AUTH_STORAGE_KEY, null as TwitchAuthData | null);
+  if (existing) {
+    return;
+  }
+
+  for (const legacyKey of TWITCH_LEGACY_AUTH_STORAGE_KEYS) {
+    const legacy = await loadFromStorage(legacyKey, null as any);
+    if (!legacy) {
+      continue;
+    }
+
+    try {
+      const clientId = TWITCH_CLIENT_ID;
+      if (!clientId || typeof legacy !== 'object' || !('accessToken' in legacy)) {
+        continue;
+      }
+
+      const obtainedAt = Date.now();
+      const expiresAt = typeof (legacy as any).expiresAt === 'number' ? (legacy as any).expiresAt : obtainedAt;
+      const expiresIn = Math.max(0, Math.round((expiresAt - obtainedAt) / 1000));
+      const userId: string | undefined =
+        typeof (legacy as any).broadcasterId === 'string'
+          ? (legacy as any).broadcasterId
+          : typeof (legacy as any).userId === 'string'
+          ? (legacy as any).userId
+          : undefined;
+
+      if (!userId) {
+        continue;
+      }
+
+      const migrated: TwitchAuthData = {
+        accessToken: String((legacy as any).accessToken ?? ''),
+        tokenType: 'bearer',
+        scopes: Array.isArray((legacy as any).scopes) ? (legacy as any).scopes : [],
+        clientId,
+        userId,
+        displayName: typeof (legacy as any).displayName === 'string' ? (legacy as any).displayName : '',
+        obtainedAt,
+        expiresIn
+      };
+
+      if (!migrated.accessToken) {
+        continue;
+      }
+
+      await saveToStorage(TWITCH_AUTH_STORAGE_KEY, migrated);
+      return;
+    } finally {
+      await removeFromStorage(legacyKey);
+    }
+  }
+}
+
 async function init(): Promise<void> {
+  await migrateLegacyAuthStorage();
   cachedState = await loadFromStorage(POPUP_STATE_STORAGE_KEY, createDefaultPopupState());
   twitchAuth = await loadFromStorage(TWITCH_AUTH_STORAGE_KEY, null);
-  await syncStateWithAuth({ persist: false, broadcast: false, keepDisplayName: true });
+  await syncStateWithAuth({ persist: false, broadcast: false });
 
-  if (twitchAuth && isAuthUsable(twitchAuth)) {
+  if (twitchAuth) {
     try {
+      await ensureValidatedAuth();
       await refreshStoredProfile();
       await startEventSub();
     } catch (error) {
       console.warn('[background] Failed to resume Twitch session', error);
       await handleAuthFailure(error);
     }
-  } else if (twitchAuth) {
-    await handleExpiredToken();
   }
 }
 
@@ -145,18 +230,14 @@ async function updateCachedState(
   }
 }
 
-async function syncStateWithAuth(options: {
-  persist?: boolean;
-  broadcast?: boolean;
-  keepDisplayName?: boolean;
-} = {}): Promise<void> {
-  const { persist = true, broadcast = true, keepDisplayName = true } = options;
-  const loggedIn = twitchAuth !== null && isAuthUsable(twitchAuth);
-  const displayName = twitchAuth?.displayName ?? (keepDisplayName ? cachedState.twitchDisplayName : null);
+async function syncStateWithAuth(options: { persist?: boolean; broadcast?: boolean } = {}): Promise<void> {
+  const { persist = true, broadcast = true } = options;
+  const loggedIn = twitchAuth !== null;
+  const displayName = twitchAuth?.displayName ?? null;
   await updateCachedState(
     {
       loggedIn,
-      twitchDisplayName: displayName ?? null
+      twitchDisplayName: displayName
     },
     { persist, broadcast }
   );
@@ -168,20 +249,17 @@ function updateDiagnostics(partial: Partial<TwitchDiagnosticsSnapshot>): void {
 }
 
 function isAuthUsable(auth: TwitchAuthData): boolean {
-  return auth.expiresAt - AUTH_EXPIRY_PADDING_MS > Date.now();
+  return getAuthRemainingMs(auth) > AUTH_EXPIRY_PADDING_MS;
 }
 
-async function setAuthData(
-  next: TwitchAuthData | null,
-  options: { keepDisplayName?: boolean; broadcast?: boolean } = {}
-): Promise<void> {
+async function setAuthData(next: TwitchAuthData | null, options: { broadcast?: boolean } = {}): Promise<void> {
   twitchAuth = next;
   if (next) {
     await saveToStorage(TWITCH_AUTH_STORAGE_KEY, next);
   } else {
     await removeFromStorage(TWITCH_AUTH_STORAGE_KEY);
   }
-  await syncStateWithAuth({ keepDisplayName: options.keepDisplayName ?? Boolean(next), broadcast: options.broadcast });
+  await syncStateWithAuth({ broadcast: options.broadcast });
 }
 async function refreshStoredProfile(): Promise<void> {
   if (!twitchAuth) return;
@@ -189,41 +267,45 @@ async function refreshStoredProfile(): Promise<void> {
   if (!response.ok) {
     throw new Error(`Failed to refresh Twitch profile (${response.status})`);
   }
-  const body = (await response.json()) as { data?: Array<{ id: string; display_name: string; login: string }> };
+  const body = (await response.json()) as { data?: Array<{ id: string; display_name: string }> };
   const profile = body.data?.[0];
   if (!profile) {
     throw new Error('Missing Twitch user profile data');
   }
-  if (
-    profile.display_name !== twitchAuth.displayName ||
-    profile.login !== twitchAuth.login ||
-    profile.id !== twitchAuth.broadcasterId
-  ) {
-    await setAuthData(
-      {
-        ...twitchAuth,
-        displayName: profile.display_name,
-        login: profile.login,
-        broadcasterId: profile.id
-      },
-      { keepDisplayName: true }
-    );
+
+  const updates: Partial<TwitchAuthData> = {};
+  if (profile.display_name && profile.display_name !== twitchAuth.displayName) {
+    updates.displayName = profile.display_name;
+  }
+  if (profile.id && profile.id !== twitchAuth.userId) {
+    updates.userId = profile.id;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await setAuthData({ ...twitchAuth, ...updates });
   } else {
-    await syncStateWithAuth({ keepDisplayName: true });
+    await syncStateWithAuth();
   }
 }
 
-async function handleExpiredToken(): Promise<void> {
-  updateDiagnostics({ lastError: 'Token expired', websocketConnected: false, sessionId: null, subscriptions: 0 });
-  await setAuthData(null, { keepDisplayName: true });
+async function handleExpiredToken(message = 'Token expired'): Promise<void> {
+  updateDiagnostics({
+    lastError: message,
+    websocketConnected: false,
+    sessionId: null,
+    subscriptions: 0,
+    tokenType: null,
+    tokenClientId: null,
+    tokenExpiresIn: null
+  });
+  await setAuthData(null, { broadcast: true });
   cleanupEventSub();
 }
 
 async function handleAuthFailure(reason: unknown): Promise<void> {
   console.warn('[background] Twitch authentication failure', reason);
-  updateDiagnostics({ lastError: 'Authentication required', websocketConnected: false, sessionId: null, subscriptions: 0 });
-  await setAuthData(null, { keepDisplayName: true });
-  cleanupEventSub();
+  const message = typeof reason === 'string' ? reason : 'Authentication required';
+  await handleExpiredToken(message);
 }
 
 async function performOAuthFlow(): Promise<TwitchAuthData> {
@@ -261,8 +343,7 @@ async function performOAuthFlow(): Promise<TwitchAuthData> {
   const params = new URLSearchParams(fragment);
   const returnedState = params.get('state');
   const accessToken = params.get('access_token');
-  const expiresInRaw = params.get('expires_in');
-  const scopeList = params.get('scope')?.split(' ').filter(Boolean) ?? [];
+  const scopeFragment = params.get('scope')?.split(' ').filter(Boolean) ?? [];
 
   if (!accessToken) {
     throw new Error('Missing access token from Twitch redirect');
@@ -271,27 +352,37 @@ async function performOAuthFlow(): Promise<TwitchAuthData> {
     throw new Error('OAuth state mismatch');
   }
 
-  const missing = scopesMissing(TWITCH_REQUIRED_SCOPES, scopeList);
-  if (missing.length > 0) {
-    throw new MissingScopesError(missing);
+  const validation = await validateAccessToken(accessToken);
+  if (validation.client_id && TWITCH_CLIENT_ID && validation.client_id !== TWITCH_CLIENT_ID) {
+    throw new Error('Token was issued for a different client');
   }
 
-  const expiresIn = Number.parseInt(expiresInRaw ?? '0', 10);
-  const expiresAt = Date.now() + Math.max(expiresIn, 0) * 1000;
+  const grantedScopes = validation.scopes?.length ? validation.scopes : scopeFragment;
+  const missingScopes = scopesMissing(TWITCH_REQUIRED_SCOPES, grantedScopes);
+  if (missingScopes.length > 0) {
+    throw new MissingScopesError(missingScopes);
+  }
+
+  if (!validation.user_id) {
+    throw new Error('Missing user identifier from validation');
+  }
+
   const profile = await fetchProfileWithToken(accessToken);
+  const obtainedAt = Date.now();
 
   return {
     accessToken,
-    expiresAt,
-    obtainedAt: Date.now(),
-    scopes: scopeList,
-    broadcasterId: profile.id,
+    tokenType: 'bearer',
+    scopes: grantedScopes,
+    clientId: validation.client_id,
+    userId: validation.user_id,
     displayName: profile.display_name,
-    login: profile.login
+    obtainedAt,
+    expiresIn: validation.expires_in
   };
 }
 
-async function fetchProfileWithToken(token: string): Promise<{ id: string; display_name: string; login: string }> {
+async function fetchProfileWithToken(token: string): Promise<{ id: string; display_name: string }> {
   ensureClientId();
   const response = await fetch(`${TWITCH_HELIX_BASE}/users`, {
     headers: {
@@ -305,7 +396,7 @@ async function fetchProfileWithToken(token: string): Promise<{ id: string; displ
     }
     throw new Error(`Failed to fetch Twitch profile (${response.status})`);
   }
-  const body = (await response.json()) as { data?: Array<{ id: string; display_name: string; login: string }> };
+  const body = (await response.json()) as { data?: Array<{ id: string; display_name: string }> };
   const profile = body.data?.[0];
   if (!profile) {
     throw new Error('Twitch profile payload missing');
@@ -325,21 +416,125 @@ function generateState(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function helixFetch(path: string, init: RequestInit = {}, attempt = 0): Promise<Response> {
+function sanitizeForDiagnostics(input: unknown): unknown {
+  if (!input || typeof input !== 'object') {
+    return input;
+  }
+  if (Array.isArray(input)) {
+    return input.map((value) => sanitizeForDiagnostics(value));
+  }
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (key.toLowerCase().includes('token')) {
+      continue;
+    }
+    result[key] = sanitizeForDiagnostics(value);
+  }
+  return result;
+}
+
+async function validateAccessToken(token: string): Promise<OAuthValidateResponse> {
+  const response = await fetch(`${TWITCH_AUTH_BASE}/validate`, {
+    headers: {
+      Authorization: `OAuth ${token}`
+    }
+  });
+
+  if (!response.ok) {
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch (error) {
+      try {
+        body = await response.text();
+      } catch {
+        body = null;
+      }
+    }
+    throw new TokenValidationError(response.status, sanitizeForDiagnostics(body));
+  }
+
+  return (await response.json()) as OAuthValidateResponse;
+}
+
+async function ensureValidatedAuth(): Promise<TwitchAuthData> {
   if (!twitchAuth) {
     throw new Error('Not authenticated with Twitch');
   }
-  ensureClientId();
+
+  if (!isAuthUsable(twitchAuth)) {
+    await handleExpiredToken('Token expired');
+    throw new Error('Token expired');
+  }
+
+  try {
+    const validation = await validateAccessToken(twitchAuth.accessToken);
+    const grantedScopes = validation.scopes?.length ? validation.scopes : twitchAuth.scopes;
+    const missing = scopesMissing(TWITCH_REQUIRED_SCOPES, grantedScopes);
+    if (missing.length > 0) {
+      throw new MissingScopesError(missing);
+    }
+
+    const next: TwitchAuthData = {
+      ...twitchAuth,
+      tokenType: 'bearer',
+      scopes: grantedScopes,
+      clientId: validation.client_id,
+      userId: validation.user_id,
+      obtainedAt: Date.now(),
+      expiresIn: validation.expires_in
+    };
+
+    await setAuthData(next, { broadcast: true });
+    updateDiagnostics({
+      tokenType: 'user',
+      tokenClientId: validation.client_id,
+      tokenExpiresIn: validation.expires_in,
+      lastError: null
+    });
+    return next;
+  } catch (error) {
+    if (error instanceof TokenValidationError) {
+      updateDiagnostics({
+        lastError: JSON.stringify({ status: error.status, body: error.body }),
+        tokenType: null,
+        tokenClientId: null,
+        tokenExpiresIn: null,
+        websocketConnected: false,
+        sessionId: null,
+        subscriptions: 0
+      });
+      await setAuthData(null, { broadcast: true });
+      cleanupEventSub();
+      throw error;
+    }
+    if (error instanceof MissingScopesError) {
+      updateDiagnostics({
+        lastError: `Missing scopes: ${error.missing.join(', ')}`,
+        tokenType: null,
+        tokenClientId: null,
+        tokenExpiresIn: null
+      });
+      await setAuthData(null, { broadcast: true });
+      cleanupEventSub();
+      throw error;
+    }
+    throw error;
+  }
+}
+
+async function helixFetch(path: string, init: RequestInit = {}, attempt = 0): Promise<Response> {
+  const auth = await ensureValidatedAuth();
   const headers = new Headers(init.headers ?? {});
-  headers.set('Authorization', `Bearer ${twitchAuth.accessToken}`);
-  headers.set('Client-Id', TWITCH_CLIENT_ID);
+  headers.set('Authorization', `Bearer ${auth.accessToken}`);
+  headers.set('Client-Id', auth.clientId);
   if (init.method === 'POST' || init.method === 'PATCH') {
     headers.set('Content-Type', 'application/json');
   }
 
   const response = await fetch(`${TWITCH_HELIX_BASE}${path}`, { ...init, headers });
   if (response.status === 401) {
-    await handleAuthFailure('Unauthorized');
+    await handleExpiredToken('Unauthorized');
     return response;
   }
   if (response.status === 429 && attempt < 3) {
@@ -362,9 +557,11 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 async function startEventSub(): Promise<void> {
-  if (!twitchAuth || !isAuthUsable(twitchAuth)) {
-    return;
+  if (!twitchAuth) {
+    throw new Error('Not authenticated with Twitch');
   }
+
+  await ensureValidatedAuth();
   cleanupEventSub();
   connectEventSub();
 }
@@ -557,7 +754,7 @@ async function ensureSubscriptions(): Promise<void> {
     return;
   }
   try {
-    const definitions = getRequiredEventSubDefinitions(twitchAuth.broadcasterId);
+    const definitions = getRequiredEventSubDefinitions(twitchAuth.userId);
     const existing = await listSubscriptions();
     let active = 0;
 
@@ -633,7 +830,7 @@ async function deleteAllSubscriptions(): Promise<void> {
   try {
     const subs = await listSubscriptions();
     for (const sub of subs) {
-      if (subscriptionOwnedByBroadcaster(sub, twitchAuth.broadcasterId)) {
+      if (subscriptionOwnedByBroadcaster(sub, twitchAuth.userId)) {
         await deleteSubscription(sub.id);
       }
     }
@@ -662,9 +859,9 @@ function subscriptionMatchesDefinition(
   return true;
 }
 
-function subscriptionOwnedByBroadcaster(sub: HelixSubscription, broadcasterId: string): boolean {
+function subscriptionOwnedByBroadcaster(sub: HelixSubscription, userId: string): boolean {
   const conditionValues = Object.values(sub.condition ?? {});
-  return conditionValues.includes(broadcasterId);
+  return conditionValues.includes(userId);
 }
 
 function mapSubscriptionToBinding(type: string): BindingEventType | null {
@@ -719,11 +916,13 @@ async function handleTestEvent(payload: {
 
 async function ensureFreshAuth(): Promise<boolean> {
   if (!twitchAuth) return false;
-  if (!isAuthUsable(twitchAuth)) {
-    await handleExpiredToken();
+  try {
+    await ensureValidatedAuth();
+    return true;
+  } catch (error) {
+    console.warn('[background] ensureFreshAuth failed', error);
     return false;
   }
-  return true;
 }
 type ActionResult = {
   status: 'ok' | 'error';
@@ -734,7 +933,7 @@ type ActionResult = {
 async function initiateConnect(): Promise<ActionResult> {
   try {
     const auth = await performOAuthFlow();
-    await setAuthData(auth, { keepDisplayName: true });
+    await setAuthData(auth, { broadcast: true });
     await startEventSub();
     return { status: 'ok', messageKey: 'toasts.twitchConnected' };
   } catch (error) {
@@ -757,11 +956,16 @@ async function initiateConnect(): Promise<ActionResult> {
 }
 
 async function initiateReconnect(): Promise<ActionResult> {
-  if (!(await ensureFreshAuth())) {
-    return await initiateConnect();
+  try {
+    if (!(await ensureFreshAuth())) {
+      return await initiateConnect();
+    }
+    await startEventSub();
+    return { status: 'ok', messageKey: 'toasts.twitchReconnected' };
+  } catch (error) {
+    console.error('[background] Twitch reconnect failed', error);
+    return { status: 'error', messageKey: 'toasts.twitchAuthFailed' };
   }
-  await startEventSub();
-  return { status: 'ok', messageKey: 'toasts.twitchReconnected' };
 }
 
 async function disconnectFromTwitch(): Promise<ActionResult> {
@@ -769,7 +973,7 @@ async function disconnectFromTwitch(): Promise<ActionResult> {
     await deleteAllSubscriptions();
   }
   cleanupEventSub();
-  await setAuthData(null, { keepDisplayName: false });
+  await setAuthData(null, { broadcast: true });
   updateDiagnostics({ lastError: null, subscriptions: 0, sessionId: null, websocketConnected: false });
   return { status: 'ok', messageKey: 'toasts.twitchDisconnected' };
 }
