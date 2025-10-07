@@ -44,6 +44,18 @@ textarea:focus-visible {
   outline-offset: 2px;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 #app {
   padding: 16px;
   box-sizing: border-box;
@@ -535,24 +547,62 @@ input[type='range'] {
 }
 
 .binding-row {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
   padding: 12px;
   border-radius: var(--border-radius);
   border: 1px solid var(--panel-border);
   margin-bottom: 8px;
   gap: 12px;
+  transition: background-color 0.2s ease;
 }
 
-.binding-row__actions {
+.binding-row--hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.binding-row__toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+}
+
+.binding-row__main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 8px 12px;
+  border-radius: var(--border-radius);
+  text-align: left;
+  cursor: pointer;
+}
+
+.binding-row__label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .binding-row__chevron {
   font-size: 18px;
+}
+
+.binding-row__delete {
+  white-space: nowrap;
+}
+
+.binding-row__delete--confirm {
+  color: var(--status-disconnected);
+}
+
+.binding-row__delete--confirm:hover {
+  background: rgba(248, 81, 73, 0.18);
 }
 
 .empty {

@@ -75,6 +75,8 @@
     "empty": "Ňō ƅīņđīņĝś ẏēŧ.",
     "toggleLabel": "Ĕņàƅļēđ",
     "delete": "Đēļēŧē",
+    "deleteConfirm": "Ćōņƒīŕṁ?",
+    "toggleAria": "Ĕņàƅļē ōŗ đīśàƅļē {label}",
     "unsavedConfirm": "Ľēàṽē ŵīŧĥōŭŧ śàṽīņĝ?",
     "unsavedConfirmLeave": "Ľēàṽē",
     "unsavedConfirmCancel": "Ćàņćēļ",
