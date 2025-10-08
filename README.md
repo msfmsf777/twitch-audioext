@@ -1,8 +1,6 @@
-# Twitch AudioFX Extension (Phase 2)
+# Twitch AudioFX Extension (Phase 3)
 
-This repository delivers the Phase 2 milestone for the Twitch AudioFX Chrome extension. The popup and bindings UX from Phase 1 r
-emain unchanged, but the extension now authenticates with Twitch and listens for real EventSub notifications from the backgroun
-d service worker.
+This repository delivers the Phase 3 milestone for the Twitch AudioFX Chrome extension. Building on the Phase 1 UI and Phase 2 Twitch wiring, the extension now processes real-time audio in the active tab while continuing to authenticate with Twitch and listen for EventSub notifications from the background service worker.
 
 ## Getting Started
 
@@ -36,7 +34,7 @@ ath it will be `https://<EXTENSION_ID>.chromiumapp.org/twitch`.
    - `moderator:read:followers`
    - `user:write:chat`
 
-## Features Implemented in Phase 2
+## Features Implemented in Phase 3
 
 - Manifest V3 configuration targeting Chrome 116+ with `identity`, `storage`, `scripting`, `activeTab`, and host permissions for `https://id.twitch.tv/*` and `https://api.twitch.tv/*`.
 - OAuth connect/reconnect/disconnect flows that persist the broadcaster's access token, scopes, display name, and user ID in `chrome.storage.local`.
@@ -49,6 +47,12 @@ notification type/time, and the most recent error.
 tus updates based on background action responses.
 - A collapsible **Event Log** lists the last 200 real and test events with matched bindings, status transitions, and chat message results so you can confirm automation activity at a glance.
 - Matched bindings schedule effect stacks (pitch/speed adjustments plus optional chat messages) with delay/duration timers, and Send Chat Message calls post templated responses directly into your Twitch chat using the broadcaster token.
+
+- The content script now hosts a per-tab audio engine that applies Rubber Band–powered pitch shifting (±12 semitones) alongside synchronized playback speed control, automatically disabling the controls when no playable media is detected or when DRM/CORS rules prevent capture.
+
+## Rubber Band Licensing
+
+This project currently integrates the GPL-licensed Rubber Band Library WASM build for pitch shifting. If you intend to distribute the extension under a different license or for commercial use, you must either comply with the GPL’s requirements or secure a commercial Rubber Band license from https://www.breakfastquay.com/rubberband/.
 
 ## Debugging Tips
 

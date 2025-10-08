@@ -130,6 +130,16 @@ input[type='range'] {
   gap: 10px;
 }
 
+.control-block--disabled {
+  opacity: 0.6;
+}
+
+.control-block--disabled .stepper,
+.control-block--disabled .control-block__value-button,
+.control-block--disabled .control-block__reset {
+  cursor: not-allowed;
+}
+
 .control-block__row {
   display: flex;
   align-items: center;
@@ -144,9 +154,21 @@ input[type='range'] {
   gap: 8px;
 }
 
+.control-block__title-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .control-block__title {
   font-size: 16px;
   margin: 0;
+}
+
+.control-block__status {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--muted-color);
 }
 
 .control-block__value {

@@ -36,6 +36,10 @@
     "valueInputLabel": "Ƥļàŷƀàćķ śƥēēđ ƥēŗćēņŧàĝē",
     "invalidValue": "Ĕņŧēŕ à ṽàļŭē ƀēŧŵēēņ 50 àņđ 200."
   },
+  "media": {
+    "noMedia": "Ňō mēđīà ƒōŭņđ ōņ ŧĥīś ƥàĝē",
+    "unsupported": "Mēđīà īś ŭņśŭƥƥōŗŧēđ ĥēŗē (ĐŔM/ĆŌŔŜ)"
+  },
   "twitch": {
     "statusDisconnected": "Đīśćōņņēćŧēđ",
     "statusConnected": "Ćōņņēćŧēđ àś {displayName}",

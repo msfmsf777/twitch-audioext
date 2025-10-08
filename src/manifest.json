@@ -14,5 +14,11 @@
   "action": {
     "default_popup": "popup/index.html",
     "default_title": "__MSG_extensionDefaultTitle__"
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["content/audio-worklet.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

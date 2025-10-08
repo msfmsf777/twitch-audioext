@@ -93,9 +93,20 @@ export interface PopupPersistentState {
   bindings: BindingDefinition[];
   diagnosticsExpanded: boolean;
   eventLogExpanded: boolean;
+  mediaAvailability: MediaAvailabilityState;
 }
 
 export const POPUP_STATE_STORAGE_KEY = 'popupState';
+export const MEDIA_AVAILABILITY_STORAGE_KEY = 'mediaAvailability';
+
+export type MediaAvailabilityReason = 'none' | 'no_media' | 'drm_cors';
+
+export interface MediaAvailabilityState {
+  hasAnyMedia: boolean;
+  hasUsableMedia: boolean;
+  reason: MediaAvailabilityReason;
+  tabId?: number | null;
+}
 
 export function createDefaultPopupState(): PopupPersistentState {
   return {
@@ -117,6 +128,11 @@ export function createDefaultPopupState(): PopupPersistentState {
     },
     bindings: [],
     diagnosticsExpanded: false,
-    eventLogExpanded: false
+    eventLogExpanded: false,
+    mediaAvailability: {
+      hasAnyMedia: true,
+      hasUsableMedia: true,
+      reason: 'none'
+    }
   };
 }

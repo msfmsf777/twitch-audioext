@@ -6,6 +6,7 @@ import {
 } from '../shared/messages';
 import {
   createDefaultPopupState,
+  MEDIA_AVAILABILITY_STORAGE_KEY,
   POPUP_STATE_STORAGE_KEY,
   type PopupPersistentState,
   type BindingEventType,
@@ -13,7 +14,9 @@ import {
   type TestEventType,
   type ChannelPointRewardSummary,
   type RangeConfig,
-  type BindingDefinition
+  type BindingDefinition,
+  type MediaAvailabilityState,
+  type MediaAvailabilityReason
 } from '../shared/state';
 import { loadFromStorage, removeFromStorage, saveToStorage } from '../shared/storage';
 import {
@@ -243,16 +246,44 @@ function sanitizeBindings(bindings: BindingDefinition[] | undefined | null): Bin
   return changed ? sanitized : bindings;
 }
 
+function sanitizeMediaAvailability(
+  value: MediaAvailabilityState | undefined | null
+): MediaAvailabilityState {
+  if (value && typeof value === 'object') {
+    const hasAny = typeof value.hasAnyMedia === 'boolean' ? value.hasAnyMedia : Boolean(value.hasAnyMedia);
+    const hasUsable =
+      typeof value.hasUsableMedia === 'boolean' ? value.hasUsableMedia : Boolean(value.hasUsableMedia);
+    const reason: MediaAvailabilityReason =
+      value.reason === 'drm_cors' || value.reason === 'no_media' ? value.reason : 'none';
+    if (
+      hasAny === value.hasAnyMedia &&
+      hasUsable === value.hasUsableMedia &&
+      reason === value.reason &&
+      value.tabId === undefined
+    ) {
+      return value;
+    }
+    return { hasAnyMedia: hasAny, hasUsableMedia: hasUsable, reason };
+  }
+  return { hasAnyMedia: true, hasUsableMedia: true, reason: 'none' };
+}
+
 function sanitizePopupState(state: PopupPersistentState): PopupPersistentState {
   const sanitizedBindings = sanitizeBindings(state.bindings);
   const rewards = Array.isArray(state.channelPointRewards) ? state.channelPointRewards : [];
-  if (sanitizedBindings === state.bindings && rewards === state.channelPointRewards) {
+  const availability = sanitizeMediaAvailability(state.mediaAvailability);
+  if (
+    sanitizedBindings === state.bindings &&
+    rewards === state.channelPointRewards &&
+    availability === state.mediaAvailability
+  ) {
     return state;
   }
   return {
     ...state,
     bindings: sanitizedBindings,
-    channelPointRewards: rewards
+    channelPointRewards: rewards,
+    mediaAvailability: availability
   };
 }
 
@@ -1194,9 +1225,9 @@ async function sendChatMessage(
   }
 }
 
-async function sendEffectMessage(message: BackgroundToContentMessage): Promise<void> {
+async function sendEffectMessage(message: BackgroundToContentMessage, targetTabId?: number): Promise<void> {
   try {
-    const tabId = activeContentTabId;
+    const tabId = typeof targetTabId === 'number' ? targetTabId : activeContentTabId;
     if (typeof tabId !== 'number') {
       return;
     }
@@ -1209,6 +1240,44 @@ async function sendEffectMessage(message: BackgroundToContentMessage): Promise<v
   } catch (error) {
     console.warn('[background] Failed to send effect message', error);
   }
+}
+
+async function rehydrateActiveEffectsForTab(tabId: number): Promise<void> {
+  for (const effect of activeEffects.values()) {
+    if (!effect.applied) {
+      continue;
+    }
+    const pitchOp = effect.operations.find((operation) => operation.kind === 'pitch') as
+      | Extract<EffectOperation, { kind: 'pitch' }>
+      | undefined;
+    const speedOp = effect.operations.find((operation) => operation.kind === 'speed') as
+      | Extract<EffectOperation, { kind: 'speed' }>
+      | undefined;
+    await sendEffectMessage(
+      {
+        type: 'AUDIO_EFFECT_APPLY',
+        payload: {
+          effectId: effect.id,
+          pitch: pitchOp ? { op: pitchOp.op, semitones: pitchOp.semitones } : null,
+          speed: speedOp ? { op: speedOp.op, percent: speedOp.percent } : null,
+          delayMs: effect.delayMs,
+          durationMs: effect.durationMs,
+          source: effect.eventSource === 'test' ? 'test' : 'event'
+        }
+      },
+      tabId
+    );
+  }
+  await sendEffectMessage(
+    {
+      type: 'AUDIO_EFFECTS_UPDATE',
+      payload: {
+        semitoneOffset: effectAdjustments.semitoneOffset,
+        speedPercent: effectAdjustments.speedPercent
+      }
+    },
+    tabId
+  );
 }
 
 async function applyScheduledEffect(effectId: string): Promise<void> {
@@ -2144,7 +2213,8 @@ async function acceptPopupState(nextState: PopupPersistentState): Promise<void> 
   cachedState = sanitizePopupState({
     ...nextState,
     loggedIn: cachedState.loggedIn,
-    twitchDisplayName: cachedState.twitchDisplayName
+    twitchDisplayName: cachedState.twitchDisplayName,
+    mediaAvailability: cachedState.mediaAvailability
   });
   await persistCachedState();
 }
@@ -2204,20 +2274,28 @@ async function handlePopupMessage(
   }
 }
 
-function handleContentMessage(message: ContentToBackgroundMessage, sender?: chrome.runtime.MessageSender): void {
+function handleContentMessage(
+  message: ContentToBackgroundMessage,
+  sender?: chrome.runtime.MessageSender,
+  sendResponse?: (response?: unknown) => void
+): boolean {
   switch (message.type) {
-    case 'CONTENT_READY':
+    case 'CONTENT_READY': {
       console.info('[background] Content script is ready');
-      if (sender?.tab?.id != null) {
-        activeContentTabId = sender.tab.id;
+      const tabId = sender?.tab?.id ?? null;
+      if (typeof tabId === 'number') {
+        activeContentTabId = tabId;
+        void rehydrateActiveEffectsForTab(tabId);
       }
-      break;
+      sendResponse?.({ tabId });
+      return false;
+    }
     case 'CONTENT_PONG':
       console.debug('[background] Received pong from content script');
-      break;
+      return false;
     case 'AUDIO_STATUS':
       console.debug('[background] Audio status update', message.status);
-      break;
+      return false;
     case 'AUDIO_EFFECTS_UPDATE':
       effectAdjustments = {
         semitoneOffset: message.payload.semitoneOffset,
@@ -2230,9 +2308,9 @@ function handleContentMessage(message: ContentToBackgroundMessage, sender?: chro
         },
         { persist: true, broadcast: true }
       );
-      break;
+      return false;
     default:
-      break;
+      return false;
   }
 }
 
@@ -2251,7 +2329,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   }
 
   if (isContentMessage(message)) {
-    handleContentMessage(message, _sender);
+    return handleContentMessage(message, _sender, sendResponse);
   }
 
   return false;
@@ -2277,6 +2355,16 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (Array.isArray(next) && !valuesEqual(eventLog, next)) {
       eventLog = next.slice(0, EVENT_LOG_LIMIT);
       lastEventLogSerialized = JSON.stringify(eventLog);
+    }
+  }
+  if (MEDIA_AVAILABILITY_STORAGE_KEY in changes) {
+    const next = (changes as any)[MEDIA_AVAILABILITY_STORAGE_KEY]?.newValue as MediaAvailabilityState | undefined;
+    if (next) {
+      const normalized = sanitizeMediaAvailability(next);
+      if (typeof next.tabId === 'number' && activeContentTabId !== null && next.tabId !== activeContentTabId) {
+        return;
+      }
+      void updateCachedState({ mediaAvailability: normalized });
     }
   }
 });
