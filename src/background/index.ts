@@ -6,8 +6,9 @@ import {
 } from '../shared/messages';
 import {
   createDefaultPopupState,
-  MEDIA_AVAILABILITY_STORAGE_KEY,
+  MEDIA_AVAILABILITY_BY_TAB_STORAGE_KEY,
   POPUP_STATE_STORAGE_KEY,
+  MANUAL_AUDIO_STATE_STORAGE_KEY,
   type PopupPersistentState,
   type BindingEventType,
   type SubTier,
@@ -16,7 +17,8 @@ import {
   type RangeConfig,
   type BindingDefinition,
   type MediaAvailabilityState,
-  type MediaAvailabilityReason
+  type MediaAvailabilityReason,
+  type ManualAudioState
 } from '../shared/state';
 import { loadFromStorage, removeFromStorage, saveToStorage } from '../shared/storage';
 import {
@@ -201,6 +203,10 @@ let activeEffects: Map<string, ScheduledEffect> = new Map();
 let processedMessageIds: Map<string, number> = new Map();
 let effectAdjustments = { semitoneOffset: 0, speedPercent: 0 };
 let activeContentTabId: number | null = null;
+const manualStateByTab = new Map<number, ManualAudioState>();
+const mediaAvailabilityByTab = new Map<number, MediaAvailabilityState>();
+const knownContentTabIds = new Set<number>();
+let defaultManualState: ManualAudioState = { semitoneOffset: 0, speedPercent: 100 };
 
 function sanitizeBindingDefinition(binding: BindingDefinition): BindingDefinition {
   if (!binding || typeof binding !== 'object') {
@@ -255,27 +261,188 @@ function sanitizeMediaAvailability(
       typeof value.hasUsableMedia === 'boolean' ? value.hasUsableMedia : Boolean(value.hasUsableMedia);
     const reason: MediaAvailabilityReason =
       value.reason === 'drm_cors' || value.reason === 'no_media' ? value.reason : 'none';
-    if (
-      hasAny === value.hasAnyMedia &&
-      hasUsable === value.hasUsableMedia &&
-      reason === value.reason &&
-      value.tabId === undefined
-    ) {
-      return value;
-    }
     return { hasAnyMedia: hasAny, hasUsableMedia: hasUsable, reason };
   }
   return { hasAnyMedia: true, hasUsableMedia: true, reason: 'none' };
+}
+
+function clampSemitone(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(-12, Math.min(12, Math.round(value)));
+}
+
+function clampSpeedPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 100;
+  }
+  return Math.max(50, Math.min(200, Math.round(value)));
+}
+
+function sanitizeManualState(value: ManualAudioState | undefined | null): ManualAudioState {
+  if (value && typeof value === 'object') {
+    return {
+      semitoneOffset: clampSemitone(Number((value as ManualAudioState).semitoneOffset ?? 0)),
+      speedPercent: clampSpeedPercent(Number((value as ManualAudioState).speedPercent ?? 100))
+    };
+  }
+  return { semitoneOffset: 0, speedPercent: 100 };
+}
+
+function getDefaultAvailability(): MediaAvailabilityState {
+  return { hasAnyMedia: true, hasUsableMedia: true, reason: 'none' };
+}
+
+function serializeManualStateMap(): Record<string, ManualAudioState> {
+  const payload: Record<string, ManualAudioState> = {};
+  for (const [tabId, state] of manualStateByTab.entries()) {
+    payload[String(tabId)] = { ...sanitizeManualState(state) };
+  }
+  return payload;
+}
+
+function serializeMediaAvailabilityMap(): Record<string, MediaAvailabilityState> {
+  const payload: Record<string, MediaAvailabilityState> = {};
+  for (const [tabId, state] of mediaAvailabilityByTab.entries()) {
+    payload[String(tabId)] = { ...sanitizeMediaAvailability(state) };
+  }
+  return payload;
+}
+
+function ensureManualState(tabId: number): ManualAudioState {
+  const existing = manualStateByTab.get(tabId);
+  if (existing) {
+    const sanitized = sanitizeManualState(existing);
+    if (!valuesEqual(existing, sanitized)) {
+      manualStateByTab.set(tabId, sanitized);
+      void persistManualStateMap();
+    }
+    return sanitized;
+  }
+  const base = sanitizeManualState(defaultManualState);
+  manualStateByTab.set(tabId, base);
+  void persistManualStateMap();
+  return base;
+}
+
+function updateManualState(tabId: number, state: ManualAudioState): ManualAudioState {
+  const sanitized = sanitizeManualState(state);
+  manualStateByTab.set(tabId, sanitized);
+  return sanitized;
+}
+
+function removeManualState(tabId: number): void {
+  manualStateByTab.delete(tabId);
+}
+
+function ensureAvailabilityState(tabId: number): MediaAvailabilityState {
+  const existing = mediaAvailabilityByTab.get(tabId);
+  if (existing) {
+    const sanitized = sanitizeMediaAvailability(existing);
+    if (!valuesEqual(existing, sanitized)) {
+      mediaAvailabilityByTab.set(tabId, sanitized);
+      void persistAvailabilityMap();
+    }
+    return sanitized;
+  }
+  const fallback = getDefaultAvailability();
+  mediaAvailabilityByTab.set(tabId, fallback);
+  void persistAvailabilityMap();
+  return fallback;
+}
+
+function updateAvailabilityState(tabId: number, state: MediaAvailabilityState): MediaAvailabilityState {
+  const sanitized = sanitizeMediaAvailability(state);
+  mediaAvailabilityByTab.set(tabId, sanitized);
+  return sanitized;
+}
+
+function removeAvailabilityState(tabId: number): void {
+  mediaAvailabilityByTab.delete(tabId);
+}
+
+async function persistManualStateMap(): Promise<void> {
+  await chrome.storage.local.set({
+    [MANUAL_AUDIO_STATE_STORAGE_KEY]: serializeManualStateMap()
+  });
+}
+
+async function persistAvailabilityMap(): Promise<void> {
+  await chrome.storage.local.set({
+    [MEDIA_AVAILABILITY_BY_TAB_STORAGE_KEY]: serializeMediaAvailabilityMap()
+  });
+}
+
+function getUsableContentTabIds(): number[] {
+  const targets = new Set<number>();
+  for (const [tabId, state] of mediaAvailabilityByTab.entries()) {
+    if (state.hasUsableMedia) {
+      targets.add(tabId);
+    }
+  }
+  if (targets.size === 0 && typeof activeContentTabId === 'number') {
+    targets.add(activeContentTabId);
+  }
+  for (const tabId of knownContentTabIds) {
+    if (!mediaAvailabilityByTab.has(tabId)) {
+      targets.add(tabId);
+    }
+  }
+  return Array.from(targets.values());
+}
+
+async function detectActiveTabId(): Promise<number | null> {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+        const tabId = tabs[0]?.id ?? null;
+        resolve(typeof tabId === 'number' ? tabId : null);
+      });
+    } catch (error) {
+      console.warn('[background] Failed to query active tab', error);
+      resolve(null);
+    }
+  });
+}
+
+async function setActiveContentTab(tabId: number | null, options: { broadcast?: boolean } = {}): Promise<void> {
+  const { broadcast = true } = options;
+  if (activeContentTabId === tabId) {
+    return;
+  }
+  activeContentTabId = tabId;
+  let manual = defaultManualState;
+  let availability = getDefaultAvailability();
+  if (typeof tabId === 'number') {
+    manual = ensureManualState(tabId);
+    availability = ensureAvailabilityState(tabId);
+  }
+  const shouldBroadcast = broadcast && typeof tabId === 'number';
+  await updateCachedState(
+    {
+      activeTabId: tabId,
+      semitoneOffset: manual.semitoneOffset,
+      speedPercent: manual.speedPercent,
+      mediaAvailability: availability
+    },
+    { persist: true, broadcast: shouldBroadcast }
+  );
+  if (typeof tabId === 'number') {
+    await rehydrateActiveEffectsForTab(tabId);
+  }
 }
 
 function sanitizePopupState(state: PopupPersistentState): PopupPersistentState {
   const sanitizedBindings = sanitizeBindings(state.bindings);
   const rewards = Array.isArray(state.channelPointRewards) ? state.channelPointRewards : [];
   const availability = sanitizeMediaAvailability(state.mediaAvailability);
+  const activeTabId = typeof state.activeTabId === 'number' ? state.activeTabId : null;
   if (
     sanitizedBindings === state.bindings &&
     rewards === state.channelPointRewards &&
-    availability === state.mediaAvailability
+    availability === state.mediaAvailability &&
+    activeTabId === state.activeTabId
   ) {
     return state;
   }
@@ -283,7 +450,8 @@ function sanitizePopupState(state: PopupPersistentState): PopupPersistentState {
     ...state,
     bindings: sanitizedBindings,
     channelPointRewards: rewards,
-    mediaAvailability: availability
+    mediaAvailability: availability,
+    activeTabId
   };
 }
 
@@ -360,6 +528,10 @@ async function init(): Promise<void> {
     testEvents: { ...defaults.testEvents, ...(storedState.testEvents ?? {}) }
   };
   cachedState = sanitizePopupState(cachedState);
+  defaultManualState = {
+    semitoneOffset: clampSemitone(cachedState.semitoneOffset),
+    speedPercent: clampSpeedPercent(cachedState.speedPercent)
+  };
   channelRewards = await loadFromStorage(CHANNEL_REWARDS_STORAGE_KEY, [] as ChannelPointRewardSummary[]);
   if (channelRewards.length && cachedState.channelPointRewards.length === 0) {
     cachedState = { ...cachedState, channelPointRewards: channelRewards };
@@ -375,6 +547,30 @@ async function init(): Promise<void> {
     effectSemitoneOffset: effectAdjustments.semitoneOffset ?? 0,
     effectSpeedPercent: effectAdjustments.speedPercent ?? 0
   };
+  const manualFromStorage = await loadFromStorage(
+    MANUAL_AUDIO_STATE_STORAGE_KEY,
+    {} as Record<string, ManualAudioState>
+  );
+  if (manualFromStorage && typeof manualFromStorage === 'object') {
+    for (const [key, value] of Object.entries(manualFromStorage)) {
+      const tabId = Number(key);
+      if (Number.isInteger(tabId)) {
+        manualStateByTab.set(tabId, sanitizeManualState(value));
+      }
+    }
+  }
+  const availabilityFromStorage = await loadFromStorage(
+    MEDIA_AVAILABILITY_BY_TAB_STORAGE_KEY,
+    {} as Record<string, MediaAvailabilityState>
+  );
+  if (availabilityFromStorage && typeof availabilityFromStorage === 'object') {
+    for (const [key, value] of Object.entries(availabilityFromStorage)) {
+      const tabId = Number(key);
+      if (Number.isInteger(tabId)) {
+        mediaAvailabilityByTab.set(tabId, sanitizeMediaAvailability(value));
+      }
+    }
+  }
   twitchAuth = await loadFromStorage(TWITCH_AUTH_STORAGE_KEY, null);
   await syncStateWithAuth({ persist: false, broadcast: false });
 
@@ -388,6 +584,15 @@ async function init(): Promise<void> {
       await handleAuthFailure(error);
     }
   }
+
+  chrome.tabs.query({ active: true, lastFocusedWindow: true }, (tabs) => {
+    const tabId = tabs[0]?.id ?? null;
+    if (typeof tabId === 'number') {
+      void setActiveContentTab(tabId, { broadcast: false });
+    } else {
+      void setActiveContentTab(null, { broadcast: false });
+    }
+  });
 }
 
 void init();
@@ -842,7 +1047,7 @@ async function ensureValidatedAuth(): Promise<TwitchAuthData> {
       });
       subscriptionRetryBlocked = true;
       await setAuthData(null, { broadcast: true, retainDisplayName: true });
-      cleanupEventSub();
+      cleanupEventSub({ clearEffects: false });
       throw error;
     }
     if (error instanceof MissingScopesError) {
@@ -1242,7 +1447,19 @@ async function sendEffectMessage(message: BackgroundToContentMessage, targetTabI
   }
 }
 
+async function applyManualStateToTab(tabId: number): Promise<void> {
+  const manual = ensureManualState(tabId);
+  await sendEffectMessage(
+    {
+      type: 'AUDIO_APPLY',
+      payload: { semitoneOffset: manual.semitoneOffset, speedPercent: manual.speedPercent }
+    },
+    tabId
+  );
+}
+
 async function rehydrateActiveEffectsForTab(tabId: number): Promise<void> {
+  await applyManualStateToTab(tabId);
   for (const effect of activeEffects.values()) {
     if (!effect.applied) {
       continue;
@@ -1295,7 +1512,7 @@ async function applyScheduledEffect(effectId: string): Promise<void> {
   const speedOp = effect.operations.find((op) => op.kind === 'speed') as
     | Extract<EffectOperation, { kind: 'speed' }>
     | undefined;
-  await sendEffectMessage({
+  const message: BackgroundToContentMessage = {
     type: 'AUDIO_EFFECT_APPLY',
     payload: {
       effectId: effect.id,
@@ -1305,7 +1522,10 @@ async function applyScheduledEffect(effectId: string): Promise<void> {
       durationMs: effect.durationMs,
       source: effect.eventSource === 'test' ? 'test' : 'event'
     }
-  });
+  };
+  for (const tabId of getUsableContentTabIds()) {
+    await sendEffectMessage(message, tabId);
+  }
   effect.applied = true;
   updateEventLogEntry(effect.eventLogId ?? '', { status: 'applied' });
   await pushEffectAdjustmentsFromActive();
@@ -1330,7 +1550,10 @@ async function revertScheduledEffect(effectId: string, status: EventLogStatus = 
     effect.revertTimer = null;
   }
   if (effect.applied) {
-    await sendEffectMessage({ type: 'AUDIO_EFFECT_REVERT', payload: { effectId } });
+    const message: BackgroundToContentMessage = { type: 'AUDIO_EFFECT_REVERT', payload: { effectId } };
+    for (const tabId of getUsableContentTabIds()) {
+      await sendEffectMessage(message, tabId);
+    }
   }
   activeEffects.delete(effectId);
   if (effect.eventLogId) {
@@ -1635,7 +1858,7 @@ function scheduleSubscriptionSync(delayMs = 0): void {
     subscriptionDeadlineTimer = null;
     if (!subscriptionsReady) {
       updateDiagnostics({ lastError: 'Subscription creation timeout', subscriptions: 0 });
-      cleanupEventSub({ resetBackoff: false });
+      cleanupEventSub({ resetBackoff: false, clearEffects: false });
       scheduleReconnect('subscription-timeout');
     }
   }, SUBSCRIPTION_CREATE_WINDOW_MS);
@@ -1718,14 +1941,16 @@ function scheduleReconnect(reason: string): void {
   }, delay);
 }
 
-function cleanupEventSub(options: { resetBackoff?: boolean } = {}): void {
-  const { resetBackoff = true } = options;
+function cleanupEventSub(options: { resetBackoff?: boolean; clearEffects?: boolean } = {}): void {
+  const { resetBackoff = true, clearEffects = true } = options;
   prepareForNewConnection();
   eventSubConnectionState = 'idle';
   if (resetBackoff) {
     reconnectBackoffMs = INITIAL_BACKOFF_MS;
   }
-  void clearAllScheduledEffects('skipped');
+  if (clearEffects) {
+    void clearAllScheduledEffects('skipped');
+  }
   updateDiagnostics({ websocketConnected: false, sessionId: null, subscriptions: 0 });
 }
 
@@ -1814,7 +2039,7 @@ function handleNotification(payload: any, metadata: any): void {
 function handleSessionReconnect(payload: any): void {
   const url: string | null = payload?.session?.reconnect_url ?? null;
   console.info('[background] EventSub requested reconnect', url);
-  cleanupEventSub({ resetBackoff: false });
+  cleanupEventSub({ resetBackoff: false, clearEffects: false });
   reconnectBackoffMs = INITIAL_BACKOFF_MS;
   if (url) {
     connectEventSub(url);
@@ -1834,7 +2059,7 @@ function handleSessionClose(payload: any): void {
   const status = payload?.session?.status ?? 'unknown';
   console.warn('[background] EventSub session closed', status);
   updateDiagnostics({ lastError: `Session closed: ${status}`, websocketConnected: false, sessionId: null, subscriptions: 0 });
-  cleanupEventSub();
+  cleanupEventSub({ clearEffects: false });
   scheduleReconnect('session-close');
 }
 async function ensureSubscriptions(): Promise<void> {
@@ -1851,7 +2076,7 @@ async function ensureSubscriptions(): Promise<void> {
       updateDiagnostics({ lastError: 'Missing follow subscription identifiers', subscriptions: 0 });
       clearSubscriptionTimers();
       clearChannelRewardTimer();
-      cleanupEventSub({ resetBackoff: false });
+      cleanupEventSub({ resetBackoff: false, clearEffects: false });
       return;
     }
 
@@ -1892,7 +2117,7 @@ async function ensureSubscriptions(): Promise<void> {
       updateDiagnostics({ lastError: JSON.stringify({ status: error.status, body: error.body }) });
       clearSubscriptionTimers();
       clearChannelRewardTimer();
-      cleanupEventSub({ resetBackoff: false });
+      cleanupEventSub({ resetBackoff: false, clearEffects: false });
       return;
     }
     console.error('[background] Failed to ensure EventSub subscriptions', error);
@@ -2210,13 +2435,41 @@ function sendActionResponse(
   });
 }
 async function acceptPopupState(nextState: PopupPersistentState): Promise<void> {
+  const activeTabId = cachedState.activeTabId;
+  let manualUpdated = false;
+  if (typeof activeTabId === 'number') {
+    const current = ensureManualState(activeTabId);
+    const desired = sanitizeManualState({
+      semitoneOffset: nextState.semitoneOffset,
+      speedPercent: nextState.speedPercent
+    });
+    if (!valuesEqual(current, desired)) {
+      updateManualState(activeTabId, desired);
+      manualUpdated = true;
+      await persistManualStateMap();
+      if (
+        desired.semitoneOffset === 0 &&
+        desired.speedPercent === 100 &&
+        (effectAdjustments.semitoneOffset !== 0 || effectAdjustments.speedPercent !== 0)
+      ) {
+        await clearAllScheduledEffects('reverted');
+      }
+    }
+  }
+
   cachedState = sanitizePopupState({
+    ...cachedState,
     ...nextState,
     loggedIn: cachedState.loggedIn,
     twitchDisplayName: cachedState.twitchDisplayName,
-    mediaAvailability: cachedState.mediaAvailability
+    mediaAvailability: cachedState.mediaAvailability,
+    activeTabId: cachedState.activeTabId
   });
   await persistCachedState();
+
+  if (manualUpdated && typeof activeTabId === 'number') {
+    await applyManualStateToTab(activeTabId);
+  }
 }
 
 async function handlePopupMessage(
@@ -2226,6 +2479,12 @@ async function handlePopupMessage(
   switch (message.type) {
     case 'POPUP_READY':
     case 'POPUP_REQUEST_STATE': {
+      const tabId = await detectActiveTabId();
+      if (tabId !== null) {
+        await setActiveContentTab(tabId);
+      } else {
+        await setActiveContentTab(null);
+      }
       respondToPopup(sendResponse, { type: 'BACKGROUND_STATE', state: cachedState });
       pushDiagnostics();
       return;
@@ -2284,8 +2543,16 @@ function handleContentMessage(
       console.info('[background] Content script is ready');
       const tabId = sender?.tab?.id ?? null;
       if (typeof tabId === 'number') {
-        activeContentTabId = tabId;
-        void rehydrateActiveEffectsForTab(tabId);
+        knownContentTabIds.add(tabId);
+        ensureManualState(tabId);
+        ensureAvailabilityState(tabId);
+        void persistManualStateMap();
+        void persistAvailabilityMap();
+        if (sender?.tab?.active) {
+          void setActiveContentTab(tabId);
+        } else {
+          void rehydrateActiveEffectsForTab(tabId);
+        }
       }
       sendResponse?.({ tabId });
       return false;
@@ -2309,6 +2576,25 @@ function handleContentMessage(
         { persist: true, broadcast: true }
       );
       return false;
+    case 'CONTENT_MEDIA_AVAILABILITY': {
+      const explicitTabId = typeof message.payload?.tabId === 'number' ? message.payload.tabId : null;
+      const tabId = explicitTabId ?? sender?.tab?.id ?? null;
+      if (typeof tabId === 'number') {
+        knownContentTabIds.add(tabId);
+        const previous = mediaAvailabilityByTab.get(tabId);
+        const updated = updateAvailabilityState(tabId, message.payload.availability);
+        if (!valuesEqual(previous, updated)) {
+          void persistAvailabilityMap();
+          if (tabId === activeContentTabId) {
+            void updateCachedState({ mediaAvailability: updated });
+          }
+          if (!previous?.hasUsableMedia && updated.hasUsableMedia) {
+            void rehydrateActiveEffectsForTab(tabId);
+          }
+        }
+      }
+      return false;
+    }
     default:
       return false;
   }
@@ -2335,6 +2621,21 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   return false;
 });
 
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  void setActiveContentTab(activeInfo.tabId);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  knownContentTabIds.delete(tabId);
+  removeManualState(tabId);
+  removeAvailabilityState(tabId);
+  void persistManualStateMap();
+  void persistAvailabilityMap();
+  if (activeContentTabId === tabId) {
+    void setActiveContentTab(null);
+  }
+});
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') {
     return;
@@ -2355,16 +2656,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (Array.isArray(next) && !valuesEqual(eventLog, next)) {
       eventLog = next.slice(0, EVENT_LOG_LIMIT);
       lastEventLogSerialized = JSON.stringify(eventLog);
-    }
-  }
-  if (MEDIA_AVAILABILITY_STORAGE_KEY in changes) {
-    const next = (changes as any)[MEDIA_AVAILABILITY_STORAGE_KEY]?.newValue as MediaAvailabilityState | undefined;
-    if (next) {
-      const normalized = sanitizeMediaAvailability(next);
-      if (typeof next.tabId === 'number' && activeContentTabId !== null && next.tabId !== activeContentTabId) {
-        return;
-      }
-      void updateCachedState({ mediaAvailability: normalized });
     }
   }
 });

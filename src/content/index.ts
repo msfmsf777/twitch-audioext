@@ -1,10 +1,5 @@
 import { AudioEngine } from './audio/engine';
-import {
-  MEDIA_AVAILABILITY_STORAGE_KEY,
-  POPUP_STATE_STORAGE_KEY,
-  type MediaAvailabilityState,
-  type PopupPersistentState
-} from '../shared/state';
+import { POPUP_STATE_STORAGE_KEY, type MediaAvailabilityState, type PopupPersistentState } from '../shared/state';
 import type {
   BackgroundToContentMessage,
   PopupToContentMessage,
@@ -104,18 +99,12 @@ class ContentController {
           this.applyPopupState(next);
         }
       }
-      if (MEDIA_AVAILABILITY_STORAGE_KEY in changes) {
-        const next = changes[MEDIA_AVAILABILITY_STORAGE_KEY]?.newValue as MediaAvailabilityState | undefined;
-        if (next) {
-          this.handleAvailabilityStorage(next);
-        }
-      }
     });
   }
 
   private async loadInitialState(): Promise<void> {
     const data = await new Promise<Record<string, unknown>>((resolve) => {
-      chrome.storage.local.get([POPUP_STATE_STORAGE_KEY, EFFECT_STORAGE_KEY, MEDIA_AVAILABILITY_STORAGE_KEY], resolve);
+      chrome.storage.local.get([POPUP_STATE_STORAGE_KEY, EFFECT_STORAGE_KEY], resolve);
     });
     const popupState = data[POPUP_STATE_STORAGE_KEY] as PopupPersistentState | undefined;
     if (popupState) {
@@ -139,13 +128,13 @@ class ContentController {
       this.lastPublishedEffectTotals = { ...this.effectTotals };
     }
 
-    const storedAvailability = data[MEDIA_AVAILABILITY_STORAGE_KEY] as MediaAvailabilityState | undefined;
-    if (storedAvailability) {
-      this.handleAvailabilityStorage(storedAvailability);
-    }
+    this.scheduleAvailabilityPersist();
   }
 
   private applyPopupState(state: PopupPersistentState): void {
+    if (typeof state.activeTabId === 'number' && this.tabId !== null && state.activeTabId !== this.tabId) {
+      return;
+    }
     const nextSemitone = clamp(safeNumber(state.semitoneOffset, 0), -12, 12);
     const nextSpeed = clamp(safeNumber(state.speedPercent, 100), 50, 200);
     let changed = false;
@@ -157,29 +146,9 @@ class ContentController {
       this.baseSpeed = nextSpeed;
       changed = true;
     }
-    if (state.mediaAvailability) {
-      this.availability = {
-        hasAnyMedia: Boolean(state.mediaAvailability.hasAnyMedia),
-        hasUsableMedia: Boolean(state.mediaAvailability.hasUsableMedia),
-        reason: state.mediaAvailability.reason
-      };
-      this.scheduleAvailabilityPersist();
-    }
     if (changed) {
       this.updateEngineTargets();
     }
-  }
-
-  private handleAvailabilityStorage(value: MediaAvailabilityState): void {
-    if (typeof value.tabId === 'number' && this.tabId !== null && value.tabId !== this.tabId) {
-      return;
-    }
-    this.availability = {
-      hasAnyMedia: Boolean(value.hasAnyMedia),
-      hasUsableMedia: Boolean(value.hasUsableMedia),
-      reason: value.reason === 'drm_cors' || value.reason === 'no_media' ? value.reason : 'none'
-    };
-    this.scheduleAvailabilityPersist();
   }
 
   private async requestTabId(): Promise<void> {
@@ -346,6 +315,9 @@ class ContentController {
     }
     this.availabilityTimer = window.setTimeout(() => {
       this.availabilityTimer = null;
+      if (this.tabId === null) {
+        return;
+      }
       const payload: MediaAvailabilityState = {
         hasAnyMedia: this.availability.hasAnyMedia,
         hasUsableMedia: this.availability.hasUsableMedia,
@@ -357,7 +329,13 @@ class ContentController {
         return;
       }
       this.lastAvailabilitySerialized = serialized;
-      chrome.storage.local.set({ [MEDIA_AVAILABILITY_STORAGE_KEY]: payload });
+      const message: ContentToBackgroundMessage = {
+        type: 'CONTENT_MEDIA_AVAILABILITY',
+        payload: { tabId: this.tabId, availability: payload }
+      };
+      chrome.runtime.sendMessage(message, () => {
+        void chrome.runtime.lastError;
+      });
     }, 150);
   }
 }

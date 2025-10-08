@@ -94,10 +94,13 @@ export interface PopupPersistentState {
   diagnosticsExpanded: boolean;
   eventLogExpanded: boolean;
   mediaAvailability: MediaAvailabilityState;
+  activeTabId: number | null;
 }
 
 export const POPUP_STATE_STORAGE_KEY = 'popupState';
 export const MEDIA_AVAILABILITY_STORAGE_KEY = 'mediaAvailability';
+export const MEDIA_AVAILABILITY_BY_TAB_STORAGE_KEY = 'mediaAvailabilityByTab';
+export const MANUAL_AUDIO_STATE_STORAGE_KEY = 'manualAudioStateByTab';
 
 export type MediaAvailabilityReason = 'none' | 'no_media' | 'drm_cors';
 
@@ -106,6 +109,11 @@ export interface MediaAvailabilityState {
   hasUsableMedia: boolean;
   reason: MediaAvailabilityReason;
   tabId?: number | null;
+}
+
+export interface ManualAudioState {
+  semitoneOffset: number;
+  speedPercent: number;
 }
 
 export function createDefaultPopupState(): PopupPersistentState {
@@ -133,6 +141,7 @@ export function createDefaultPopupState(): PopupPersistentState {
       hasAnyMedia: true,
       hasUsableMedia: true,
       reason: 'none'
-    }
+    },
+    activeTabId: null
   };
 }
