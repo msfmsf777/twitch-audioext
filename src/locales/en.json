@@ -47,7 +47,7 @@
     "captureTooltip": "When on, Twitch events will trigger your bindings in this tab.",
     "sectionLabel": "Twitch connection",
     "logoAlt": "Twitch logo",
-    "refreshRewards": "Refresh rewards"
+    "refresh": "Refresh"
   },
   "testEvents": {
     "title": "Test Events",
@@ -108,6 +108,7 @@
     "durationHint": "How long before the effect resets. Leave blank to persist.",
     "chatTemplate": "Chat message template",
     "insertUser": "Insert %user%",
+    "reselectReward": "Select a channel reward to finish saving.",
     "save": "Save",
     "amountHintPitch": "+2 semitones",
     "amountHintSpeed": "+5%",

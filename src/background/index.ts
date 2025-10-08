@@ -199,6 +199,63 @@ let processedMessageIds: Map<string, number> = new Map();
 let effectAdjustments = { semitoneOffset: 0, speedPercent: 0 };
 let activeContentTabId: number | null = null;
 
+function sanitizeBindingDefinition(binding: BindingDefinition): BindingDefinition {
+  if (!binding || typeof binding !== 'object') {
+    return binding;
+  }
+  if (binding.config.type !== 'channel_points') {
+    return binding;
+  }
+  const rawId = binding.config.rewardId;
+  const trimmedId = typeof rawId === 'string' ? rawId.trim() : '';
+  const rewardId = trimmedId.length > 0 ? trimmedId : null;
+  const rawTitle = binding.config.rewardTitle;
+  const trimmedTitle = typeof rawTitle === 'string' ? rawTitle.trim() : '';
+  const rewardTitle = rewardId && trimmedTitle.length > 0 ? trimmedTitle : null;
+  if (
+    rewardId === binding.config.rewardId &&
+    (rewardTitle ?? null) === (binding.config.rewardTitle ?? null)
+  ) {
+    return binding;
+  }
+  return {
+    ...binding,
+    config: {
+      type: 'channel_points',
+      rewardId,
+      rewardTitle: rewardTitle ?? null
+    }
+  };
+}
+
+function sanitizeBindings(bindings: BindingDefinition[] | undefined | null): BindingDefinition[] {
+  if (!Array.isArray(bindings)) {
+    return [];
+  }
+  let changed = false;
+  const sanitized = bindings.map((binding) => {
+    const next = sanitizeBindingDefinition(binding);
+    if (next !== binding) {
+      changed = true;
+    }
+    return next;
+  });
+  return changed ? sanitized : bindings;
+}
+
+function sanitizePopupState(state: PopupPersistentState): PopupPersistentState {
+  const sanitizedBindings = sanitizeBindings(state.bindings);
+  const rewards = Array.isArray(state.channelPointRewards) ? state.channelPointRewards : [];
+  if (sanitizedBindings === state.bindings && rewards === state.channelPointRewards) {
+    return state;
+  }
+  return {
+    ...state,
+    bindings: sanitizedBindings,
+    channelPointRewards: rewards
+  };
+}
+
 function getAuthExpiry(auth: TwitchAuthData): number {
   return auth.obtainedAt + auth.expiresIn * 1000;
 }
@@ -271,6 +328,7 @@ async function init(): Promise<void> {
     ...storedState,
     testEvents: { ...defaults.testEvents, ...(storedState.testEvents ?? {}) }
   };
+  cachedState = sanitizePopupState(cachedState);
   channelRewards = await loadFromStorage(CHANNEL_REWARDS_STORAGE_KEY, [] as ChannelPointRewardSummary[]);
   if (channelRewards.length && cachedState.channelPointRewards.length === 0) {
     cachedState = { ...cachedState, channelPointRewards: channelRewards };
@@ -416,8 +474,14 @@ async function updateCachedState(
     if (typeof value === 'undefined') {
       continue;
     }
-    if (!valuesEqual(next[key], value)) {
-      next[key] = value as any;
+    let candidate: unknown = value;
+    if (key === 'bindings') {
+      candidate = sanitizeBindings(value as BindingDefinition[] | undefined | null);
+    } else if (key === 'channelPointRewards') {
+      candidate = Array.isArray(value) ? value : [];
+    }
+    if (!valuesEqual(next[key], candidate)) {
+      next[key] = candidate as any;
       changed = true;
     }
   }
@@ -1176,7 +1240,6 @@ async function applyScheduledEffect(effectId: string): Promise<void> {
   effect.applied = true;
   updateEventLogEntry(effect.eventLogId ?? '', { status: 'applied' });
   await pushEffectAdjustmentsFromActive();
-  await handleChatOperations(effect);
   if (effect.durationMs !== null) {
     effect.revertTimer = setTimeout(() => {
       void revertScheduledEffect(effect.id);
@@ -1267,6 +1330,9 @@ async function queueEffect(
     applied: false
   };
   activeEffects.set(effect.id, effect);
+  if (operations.some((operation) => operation.kind === 'chat')) {
+    void handleChatOperations(effect);
+  }
   if (effect.delayMs > 0) {
     effect.applyTimer = setTimeout(() => {
       void applyScheduledEffect(effect.id);
@@ -2075,11 +2141,11 @@ function sendActionResponse(
   });
 }
 async function acceptPopupState(nextState: PopupPersistentState): Promise<void> {
-  cachedState = {
+  cachedState = sanitizePopupState({
     ...nextState,
     loggedIn: cachedState.loggedIn,
     twitchDisplayName: cachedState.twitchDisplayName
-  };
+  });
   await persistCachedState();
 }
 
