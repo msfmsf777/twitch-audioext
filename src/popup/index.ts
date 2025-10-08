@@ -7,7 +7,8 @@ import {
   type PopupPersistentState,
   type SubTier,
   type TestEventType,
-  type ChannelPointRewardSummary
+  type ChannelPointRewardSummary,
+  type MediaAvailabilityState
 } from '../shared/state';
 import type { EventLogEntry, EventLogAction } from '../shared/event-log';
 import { createEmptyDiagnostics, type TwitchDiagnosticsSnapshot } from '../shared/twitch';
@@ -267,6 +268,31 @@ class PopupApp {
       this.eventLogUpdatedAt = updated;
     }
     this.handleRewardSelectionChange();
+  }
+
+  private getMediaAvailability(): MediaAvailabilityState {
+    const availability = this.state.mediaAvailability;
+    if (!availability) {
+      return { hasAnyMedia: true, hasUsableMedia: true, reason: 'none' };
+    }
+    return availability;
+  }
+
+  private controlsDisabled(): boolean {
+    return !this.getMediaAvailability().hasUsableMedia;
+  }
+
+  private getMediaStatusMessage(): string | null {
+    const availability = this.getMediaAvailability();
+    if (!availability.hasAnyMedia) {
+      return i18n.t('media.noMedia');
+    }
+    if (!availability.hasUsableMedia) {
+      return availability.reason === 'drm_cors'
+        ? i18n.t('media.unsupported')
+        : i18n.t('media.noMedia');
+    }
+    return null;
   }
 
   private async persistState(): Promise<void> {
@@ -713,6 +739,9 @@ class PopupApp {
   }
 
   private adjustSemitone(delta: number): void {
+    if (this.controlsDisabled()) {
+      return;
+    }
     this.setSemitone(this.state.semitoneOffset + delta);
   }
 
@@ -736,6 +765,9 @@ class PopupApp {
   }
 
   private adjustSpeed(delta: number): void {
+    if (this.controlsDisabled()) {
+      return;
+    }
     this.setSpeed(this.state.speedPercent + delta);
   }
 
@@ -759,10 +791,16 @@ class PopupApp {
   }
 
   private resetTranspose(): void {
+    if (this.controlsDisabled()) {
+      return;
+    }
     this.setSemitone(0);
   }
 
   private resetSpeed(): void {
+    if (this.controlsDisabled()) {
+      return;
+    }
     this.setSpeed(100);
   }
 
@@ -797,6 +835,9 @@ class PopupApp {
   }
 
   private beginValueEdit(control: 'transpose' | 'speed'): void {
+    if (this.controlsDisabled()) {
+      return;
+    }
     if (this.editingValue === control) {
       return;
     }
@@ -808,6 +849,10 @@ class PopupApp {
   }
 
   private commitValueEdit(control: 'transpose' | 'speed'): void {
+    if (this.controlsDisabled()) {
+      this.cancelValueEdit(control);
+      return;
+    }
     const selector = control === 'transpose' ? '[data-role="transpose-value-input"]' : '[data-role="speed-value-input"]';
     const input = this.root.querySelector<HTMLInputElement>(selector);
     if (!input) {
@@ -1078,12 +1123,20 @@ class PopupApp {
   }
 
   private renderTransposeBlock(): string {
-    const isEditing = this.editingValue === 'transpose';
+    const disabled = this.controlsDisabled();
+    const isEditing = !disabled && this.editingValue === 'transpose';
     const currentValue = isEditing ? this.editingValueDraft : this.formatSemitoneValue();
+    const message = this.getMediaStatusMessage();
+    const messageHtml = message
+      ? `<p class="control-block__status" role="status" aria-live="polite">${message}</p>`
+      : '';
     return `
-      <section class="control-block" aria-labelledby="transpose-heading">
+      <section class="control-block ${disabled ? 'control-block--disabled' : ''}" aria-labelledby="transpose-heading" aria-disabled="${disabled}">
         <div class="control-block__row control-block__row--top">
-          <h2 id="transpose-heading" class="control-block__title">${i18n.t('transpose.title')}</h2>
+          <div class="control-block__title-group">
+            <h2 id="transpose-heading" class="control-block__title">${i18n.t('transpose.title')}</h2>
+            ${messageHtml}
+          </div>
           ${
             isEditing
               ? `<input
@@ -1104,9 +1157,10 @@ class PopupApp {
                   data-role="transpose-value-display"
                   aria-label="${i18n.t('transpose.valueButtonLabel')}"
                   aria-live="polite"
+                  ${disabled ? 'disabled' : ''}
                 >${currentValue}</button>`
           }
-          <button type="button" class="btn btn--ghost control-block__reset" data-action="transpose-reset">
+          <button type="button" class="btn btn--ghost control-block__reset" data-action="transpose-reset" ${disabled ? 'disabled' : ''}>
             ${i18n.t('transpose.reset')}
           </button>
         </div>
@@ -1116,6 +1170,7 @@ class PopupApp {
             class="stepper"
             data-action="transpose-decrement"
             aria-label="${i18n.t('transpose.decrementLabel')}"
+            ${disabled ? 'disabled' : ''}
           >
             −
           </button>
@@ -1127,12 +1182,14 @@ class PopupApp {
             value="${this.state.semitoneOffset}"
             data-role="transpose-slider"
             aria-labelledby="transpose-heading"
+            ${disabled ? 'disabled' : ''}
           />
           <button
             type="button"
             class="stepper"
             data-action="transpose-increment"
             aria-label="${i18n.t('transpose.incrementLabel')}"
+            ${disabled ? 'disabled' : ''}
           >
             +
           </button>
@@ -1142,12 +1199,20 @@ class PopupApp {
   }
 
   private renderSpeedBlock(): string {
-    const isEditing = this.editingValue === 'speed';
+    const disabled = this.controlsDisabled();
+    const isEditing = !disabled && this.editingValue === 'speed';
     const currentValue = isEditing ? this.editingValueDraft : this.formatSpeedValue();
+    const message = this.getMediaStatusMessage();
+    const messageHtml = message
+      ? `<p class="control-block__status" role="status" aria-live="polite">${message}</p>`
+      : '';
     return `
-      <section class="control-block" aria-labelledby="speed-heading">
+      <section class="control-block ${disabled ? 'control-block--disabled' : ''}" aria-labelledby="speed-heading" aria-disabled="${disabled}">
         <div class="control-block__row control-block__row--top">
-          <h2 id="speed-heading" class="control-block__title">${i18n.t('speed.title')}</h2>
+          <div class="control-block__title-group">
+            <h2 id="speed-heading" class="control-block__title">${i18n.t('speed.title')}</h2>
+            ${messageHtml}
+          </div>
           ${
             isEditing
               ? `<input
@@ -1168,9 +1233,10 @@ class PopupApp {
                   data-role="speed-value-display"
                   aria-label="${i18n.t('speed.valueButtonLabel')}"
                   aria-live="polite"
+                  ${disabled ? 'disabled' : ''}
                 >${currentValue}</button>`
           }
-          <button type="button" class="btn btn--ghost control-block__reset" data-action="speed-reset">
+          <button type="button" class="btn btn--ghost control-block__reset" data-action="speed-reset" ${disabled ? 'disabled' : ''}>
             ${i18n.t('speed.reset')}
           </button>
         </div>
@@ -1180,6 +1246,7 @@ class PopupApp {
             class="stepper"
             data-action="speed-decrement"
             aria-label="${i18n.t('speed.decrementLabel')}"
+            ${disabled ? 'disabled' : ''}
           >
             −
           </button>
@@ -1191,12 +1258,14 @@ class PopupApp {
             value="${this.state.speedPercent}"
             data-role="speed-slider"
             aria-labelledby="speed-heading"
+            ${disabled ? 'disabled' : ''}
           />
           <button
             type="button"
             class="stepper"
             data-action="speed-increment"
             aria-label="${i18n.t('speed.incrementLabel')}"
+            ${disabled ? 'disabled' : ''}
           >
             +
           </button>
@@ -1841,6 +1910,9 @@ class PopupApp {
 
   private render(): void {
     this.clearDeleteConfirm();
+    if (this.controlsDisabled() && this.editingValue) {
+      this.cancelValueEdit(this.editingValue);
+    }
     switch (this.view) {
       case 'main':
         this.root.innerHTML = this.buildMainView();

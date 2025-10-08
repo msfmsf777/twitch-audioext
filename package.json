@@ -7,7 +7,11 @@
     "build": "node scripts/build.mjs",
     "clean": "rimraf dist"
   },
-  "keywords": ["twitch", "extension", "audio"],
+  "keywords": [
+    "twitch",
+    "extension",
+    "audio"
+  ],
   "author": "",
   "license": "MIT",
   "devDependencies": {
@@ -16,5 +20,8 @@
     "esbuild": "^0.25.10",
     "rimraf": "^6.0.1",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "rubberband-wasm": "^3.3.0"
   }
 }
