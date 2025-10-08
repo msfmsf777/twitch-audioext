@@ -32,6 +32,7 @@ export class AudioEngine {
     hasUsableMedia: false,
     reason: 'no_media'
   };
+  private availabilityInitialized = false;
   private availabilityListener: (state: MediaAvailabilityState) => void;
   private availabilityTimer: number | null = null;
   private pendingAvailability: MediaAvailabilityState | null = null;
@@ -65,13 +66,14 @@ export class AudioEngine {
   }
 
   private notifyAvailability(state: MediaAvailabilityState): void {
-    if (
+    const availabilityUnchanged =
       this.availability.hasAnyMedia === state.hasAnyMedia &&
       this.availability.hasUsableMedia === state.hasUsableMedia &&
-      this.availability.reason === state.reason
-    ) {
+      this.availability.reason === state.reason;
+    if (this.availabilityInitialized && availabilityUnchanged) {
       return;
     }
+    this.availabilityInitialized = true;
     this.availability = state;
     this.pendingAvailability = state;
     if (this.availabilityTimer) {
