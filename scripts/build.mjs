@@ -14,29 +14,40 @@ async function clean() {
   await fs.mkdir(outDir, { recursive: true });
 }
 
+const baseBuildOptions = {
+  outdir: outDir,
+  bundle: true,
+  minify: false,
+  sourcemap: true,
+  target: ['chrome116'],
+  logLevel: 'info',
+  loader: {
+    '.json': 'json',
+    '.wasm': 'binary'
+  },
+  define: {
+    'process.env.TWITCH_CLIENT_ID': JSON.stringify(process.env.TWITCH_CLIENT_ID ?? ''),
+    'process.env.TWITCH_REDIRECT_PATH': JSON.stringify(process.env.TWITCH_REDIRECT_PATH ?? 'twitch')
+  }
+};
+
 async function bundle() {
   await build({
+    ...baseBuildOptions,
     entryPoints: {
       'background': path.join(srcDir, 'background/index.ts'),
-      'content': path.join(srcDir, 'content/index.ts'),
       'content/audio-worklet': path.join(srcDir, 'content/audio/worklet.ts'),
       'popup/index': path.join(srcDir, 'popup/index.ts')
     },
-    outdir: outDir,
-    bundle: true,
-    minify: false,
-    sourcemap: true,
-    target: ['chrome116'],
-    format: 'esm',
-    logLevel: 'info',
-    loader: {
-      '.json': 'json',
-      '.wasm': 'binary'
+    format: 'esm'
+  });
+
+  await build({
+    ...baseBuildOptions,
+    entryPoints: {
+      'content': path.join(srcDir, 'content/index.ts')
     },
-    define: {
-      'process.env.TWITCH_CLIENT_ID': JSON.stringify(process.env.TWITCH_CLIENT_ID ?? ''),
-      'process.env.TWITCH_REDIRECT_PATH': JSON.stringify(process.env.TWITCH_REDIRECT_PATH ?? 'twitch')
-    }
+    format: 'iife'
   });
 }
 
