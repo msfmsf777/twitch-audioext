@@ -1,4 +1,4 @@
-import type { PopupPersistentState, SubTier, TestEventType } from './state';
+import type { MediaAvailabilityState, PopupPersistentState, SubTier, TestEventType } from './state';
 import type { TwitchDiagnosticsSnapshot } from './twitch';
 
 export type PopupToBackgroundMessage =
@@ -70,6 +70,10 @@ export type ContentToBackgroundMessage =
   | {
       type: 'AUDIO_EFFECTS_UPDATE';
       payload: { semitoneOffset: number; speedPercent: number };
+    }
+  | {
+      type: 'CONTENT_MEDIA_AVAILABILITY';
+      payload: { tabId: number | null; availability: MediaAvailabilityState };
     };
 
 export type PopupToContentMessage =
