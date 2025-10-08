@@ -308,11 +308,7 @@ input[type='range'] {
 }
 
 .twitch-card__row--secondary {
-  justify-content: flex-start;
-}
-
-.twitch-card__row--refresh {
-  justify-content: flex-end;
+  justify-content: space-between;
 }
 
 .twitch-card__identity {
@@ -352,6 +348,17 @@ input[type='range'] {
 
 .twitch-card__status {
   font-weight: 600;
+}
+
+.twitch-card__capture {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+}
+
+.twitch-card__refresh {
+  margin-left: auto;
 }
 
 .twitch-card__row--secondary .toggle {

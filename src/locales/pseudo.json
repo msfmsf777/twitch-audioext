@@ -47,7 +47,7 @@
     "captureTooltip": "Ŵĥēņ ōņ, Ŧŵīŧćĥ ēṽēņŧś ŭņŧŗīgĝē ẏōŭŗ ƅīņđīņĝś īņ ŧĥīś ŧàƅ.",
     "sectionLabel": "Ŧŵīŧćĥ ċōņņēćŧīōņ",
     "logoAlt": "Ŧŵīŧćĥ ļōĝō",
-    "refreshRewards": "Řēƒŕēśĥ ŕēŵàŕđś"
+    "refresh": "Řēƒŕēśĥ"
   },
   "testEvents": {
     "title": "Ŧēśŧ Ĕṽēņŧś",
@@ -108,6 +108,7 @@
     "durationHint": "Ĥōŵ ļōņĝ ƅēƒōŕē ŧĥē ēƒƒēćŧ ŕēśēŧś. Ľēàṽē ƅļàņķ ŧō ƥēŕśīśŧ.",
     "chatTemplate": "Ćĥàŧ mēśśàĝē ŧēṁƥļàŧē",
     "insertUser": "Īņśēŕŧ %user%",
+    "reselectReward": "Ŝēļēćŧ à ćĥàņņēļ ŕēŵàŕđ ŧō ƒīņīśĥ śàṽīņĝ.",
     "save": "Ŝàṽē",
     "amountHintPitch": "+2 śēmīŧōņēś",
     "amountHintSpeed": "+5%",

@@ -28,6 +28,7 @@ export interface BindingAction {
 export interface BindingConfigChannelPoints {
   type: 'channel_points';
   rewardId: string | null;
+  rewardTitle?: string | null;
 }
 
 export interface BindingConfigBits {

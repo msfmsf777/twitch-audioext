@@ -305,8 +305,12 @@ class PopupApp {
       this.updateTestEvents({ channelPointsRewardId: nextId }, { rerender: false });
     }
     if (this.bindingDraft && this.bindingDraft.eventType === 'channel_points') {
-      if (!this.bindingDraft.channelPointsRewardId || !availableIds.has(this.bindingDraft.channelPointsRewardId)) {
-        this.bindingDraft = { ...this.bindingDraft, channelPointsRewardId: this.channelRewards[0]?.id ?? null };
+      const current = this.bindingDraft.channelPointsRewardId;
+      const hasCurrent = current ? availableIds.has(current) : false;
+      if (!hasCurrent) {
+        const fallback =
+          !this.bindingDraft.id && this.channelRewards.length > 0 ? this.channelRewards[0]?.id ?? null : null;
+        this.bindingDraft = { ...this.bindingDraft, channelPointsRewardId: fallback };
       }
     }
   }
@@ -368,10 +372,18 @@ class PopupApp {
   }
 
   private openBindingEditor(bindingId: string | null): void {
+    const existing = bindingId ? this.state.bindings.find((entry) => entry.id === bindingId) : null;
+    const needsRewardPrompt =
+      !!existing &&
+      existing.config.type === 'channel_points' &&
+      (!existing.config.rewardId || String(existing.config.rewardId).trim().length === 0);
     this.bindingDraft = this.createBindingDraft(bindingId);
     this.bindingDraftInitial = JSON.parse(JSON.stringify(this.bindingDraft));
     this.view = 'bindingEditor';
     this.render();
+    if (needsRewardPrompt) {
+      setTimeout(() => this.toast.show(i18n.t('bindings.reselectReward')), 0);
+    }
   }
 
   private async maybeLeaveBindingEditor(): Promise<boolean> {
@@ -398,7 +410,7 @@ class PopupApp {
           label: binding.label,
           eventType: binding.eventType,
           channelPointsRewardId:
-            binding.config.type === 'channel_points' ? binding.config.rewardId : null,
+            binding.config.type === 'channel_points' ? binding.config.rewardId ?? null : null,
           bitsMode: binding.config.type === 'bits' ? binding.config.range.mode : 'exact',
           bitsExact:
             binding.config.type === 'bits' && binding.config.range.exact !== null && binding.config.range.exact !== undefined
@@ -462,6 +474,15 @@ class PopupApp {
     if (!this.bindingDraft) return false;
     if (!this.bindingDraft.label.trim()) return false;
     if (!this.bindingDraft.eventType) return false;
+    if (this.bindingDraft.eventType === 'channel_points') {
+      const rewardId = this.bindingDraft.channelPointsRewardId;
+      if (!rewardId) {
+        return false;
+      }
+      if (rewardId.trim() === '') {
+        return false;
+      }
+    }
     if (!this.bindingDraft.action) return false;
     if (!this.bindingDraft.amount.trim()) return false;
     const amount = Number.parseFloat(this.bindingDraft.amount);
@@ -504,7 +525,24 @@ class PopupApp {
   private deriveBindingConfig(draft: BindingDraft): BindingDefinition['config'] {
     switch (draft.eventType) {
       case 'channel_points':
-        return { type: 'channel_points', rewardId: draft.channelPointsRewardId };
+        if (!draft.channelPointsRewardId) {
+          return { type: 'channel_points', rewardId: null, rewardTitle: null };
+        }
+        {
+          const reward = this.channelRewards.find((item) => item.id === draft.channelPointsRewardId);
+          let rewardTitle: string | null = reward?.title ?? null;
+          if (!rewardTitle && draft.id) {
+            const previous = this.state.bindings.find((entry) => entry.id === draft.id);
+            if (previous && previous.config.type === 'channel_points') {
+              rewardTitle = previous.config.rewardTitle ?? previous.config.rewardId ?? null;
+            }
+          }
+          return {
+            type: 'channel_points',
+            rewardId: draft.channelPointsRewardId,
+            rewardTitle
+          };
+        }
       case 'bits':
         return {
           type: 'bits',
@@ -1182,28 +1220,28 @@ class PopupApp {
           <button type="button" class="btn btn--primary" data-action="twitch-button">${meta.button}</button>
         </div>
         <div class="twitch-card__row twitch-card__row--secondary">
-          <label class="toggle" data-role="capture-toggle-wrapper">
-            <input type="checkbox" data-role="capture-toggle" ${this.state.captureEvents ? 'checked' : ''} />
-            <span class="toggle__label">${i18n.t('twitch.captureToggle')}</span>
-          </label>
+          <div class="twitch-card__capture">
+            <label class="toggle" data-role="capture-toggle-wrapper">
+              <input type="checkbox" data-role="capture-toggle" ${this.state.captureEvents ? 'checked' : ''} />
+              <span class="toggle__label">${i18n.t('twitch.captureToggle')}</span>
+            </label>
+            <button
+              type="button"
+              class="info-icon"
+              title="${i18n.t('twitch.captureTooltip')}"
+              aria-label="${i18n.t('twitch.captureTooltip')}"
+              data-role="capture-tooltip"
+            >
+              ?
+            </button>
+          </div>
           <button
             type="button"
-            class="info-icon"
-            title="${i18n.t('twitch.captureTooltip')}"
-            aria-label="${i18n.t('twitch.captureTooltip')}"
-            data-role="capture-tooltip"
-          >
-            ?
-          </button>
-        </div>
-        <div class="twitch-card__row twitch-card__row--refresh">
-          <button
-            type="button"
-            class="btn btn--ghost"
+            class="btn btn--ghost twitch-card__refresh"
             data-action="refresh-rewards"
             ${this.state.loggedIn ? '' : 'disabled'}
           >
-            ${i18n.t('twitch.refreshRewards')}
+            ${i18n.t('twitch.refresh')}
           </button>
         </div>
       </section>
@@ -2058,10 +2096,24 @@ class PopupApp {
       select.addEventListener('change', (event) => {
         const value = (event.target as HTMLSelectElement).value as BindingEventType | '';
         const update: Partial<BindingDraft> = { eventType: value };
+        if (value === 'channel_points') {
+          const current = this.bindingDraft?.channelPointsRewardId ?? null;
+          const hasCurrent = current ? this.channelRewards.some((reward) => reward.id === current) : false;
+          update.channelPointsRewardId = hasCurrent ? current : this.channelRewards[0]?.id ?? null;
+        } else {
+          update.channelPointsRewardId = null;
+        }
         if (value === 'sub' && this.bindingDraft && this.bindingDraft.subTiers.length === 0) {
           update.subTiers = ['tier1'];
         }
         this.updateBindingDraft(update, { rerender: true });
+      })
+    );
+
+    form.querySelectorAll<HTMLSelectElement>('select[name="channelReward"]').forEach((select) =>
+      select.addEventListener('change', (event) => {
+        const value = (event.target as HTMLSelectElement).value;
+        this.updateBindingDraft({ channelPointsRewardId: value ? value : null });
       })
     );
 
