@@ -2437,24 +2437,26 @@ function sendActionResponse(
 async function acceptPopupState(nextState: PopupPersistentState): Promise<void> {
   const activeTabId = cachedState.activeTabId;
   let manualUpdated = false;
+  let shouldClearOverlay = false;
   if (typeof activeTabId === 'number') {
     const current = ensureManualState(activeTabId);
     const desired = sanitizeManualState({
       semitoneOffset: nextState.semitoneOffset,
       speedPercent: nextState.speedPercent
     });
+    shouldClearOverlay =
+      desired.semitoneOffset === 0 &&
+      desired.speedPercent === 100 &&
+      (effectAdjustments.semitoneOffset !== 0 || effectAdjustments.speedPercent !== 0);
     if (!valuesEqual(current, desired)) {
       updateManualState(activeTabId, desired);
       manualUpdated = true;
       await persistManualStateMap();
-      if (
-        desired.semitoneOffset === 0 &&
-        desired.speedPercent === 100 &&
-        (effectAdjustments.semitoneOffset !== 0 || effectAdjustments.speedPercent !== 0)
-      ) {
-        await clearAllScheduledEffects('reverted');
-      }
     }
+  }
+
+  if (shouldClearOverlay) {
+    await clearAllScheduledEffects('reverted');
   }
 
   cachedState = sanitizePopupState({
@@ -2467,7 +2469,7 @@ async function acceptPopupState(nextState: PopupPersistentState): Promise<void> 
   });
   await persistCachedState();
 
-  if (manualUpdated && typeof activeTabId === 'number') {
+  if ((manualUpdated || shouldClearOverlay) && typeof activeTabId === 'number') {
     await applyManualStateToTab(activeTabId);
   }
 }
