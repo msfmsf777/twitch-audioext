@@ -645,20 +645,54 @@ class PopupApp {
     void this.persistState();
   }
 
-  private formatSemitoneValue(): string {
-    const value = this.state.semitoneOffset + this.state.effectSemitoneOffset;
-    if (value > 0) {
-      return `+${value}`;
+  private clampNumber(value: number, min: number, max: number): number {
+    if (!Number.isFinite(value)) {
+      return min;
     }
-    if (value < 0) {
-      return `-${Math.abs(value)}`;
+    if (value < min) {
+      return min;
+    }
+    if (value > max) {
+      return max;
+    }
+    return value;
+  }
+
+  private getTotalSemitone(): number {
+    return this.clampNumber(this.state.semitoneOffset + this.state.effectSemitoneOffset, -12, 12);
+  }
+
+  private getTotalSpeed(): number {
+    return this.clampNumber(this.state.speedPercent + this.state.effectSpeedPercent, 50, 200);
+  }
+
+  private toManualSemitone(total: number): number {
+    const manual = Math.round(total - this.state.effectSemitoneOffset);
+    return this.clampNumber(manual, -12, 12);
+  }
+
+  private toManualSpeed(total: number): number {
+    const manual = Math.round(total - this.state.effectSpeedPercent);
+    return this.clampNumber(manual, 50, 200);
+  }
+
+  private formatSemitoneValue(): string {
+    const total = this.getTotalSemitone();
+    const normalized = Math.abs(total) < 0.001 ? 0 : total;
+    const display = Number.isInteger(normalized) ? normalized : Number(normalized.toFixed(2));
+    if (display > 0) {
+      return `+${display}`;
+    }
+    if (display < 0) {
+      return `${display}`;
     }
     return '0';
   }
 
   private formatSpeedValue(): string {
-    const value = this.state.speedPercent + this.state.effectSpeedPercent;
-    return `${value}%`;
+    const total = this.getTotalSpeed();
+    const display = Number.isInteger(total) ? total : Number(total.toFixed(1));
+    return `${display}%`;
   }
 
   private escapeHtml(value: string): string {
@@ -760,16 +794,18 @@ class PopupApp {
 
   private resetTranspose(): void {
     this.setSemitone(0);
+    void this.runAction({ type: 'POPUP_RESET_CONTROL', control: 'pitch' });
   }
 
   private resetSpeed(): void {
     this.setSpeed(100);
+    void this.runAction({ type: 'POPUP_RESET_CONTROL', control: 'speed' });
   }
 
   private syncControlDisplays(): void {
     const transposeSlider = this.root.querySelector<HTMLInputElement>('[data-role="transpose-slider"]');
     if (transposeSlider) {
-      const value = String(this.state.semitoneOffset);
+      const value = String(this.getTotalSemitone());
       if (transposeSlider.value !== value) {
         transposeSlider.value = value;
       }
@@ -783,7 +819,7 @@ class PopupApp {
 
     const speedSlider = this.root.querySelector<HTMLInputElement>('[data-role="speed-slider"]');
     if (speedSlider) {
-      const value = String(this.state.speedPercent);
+      const value = String(this.getTotalSpeed());
       if (speedSlider.value !== value) {
         speedSlider.value = value;
       }
@@ -801,7 +837,7 @@ class PopupApp {
       return;
     }
     this.editingValue = control;
-    const current = control === 'transpose' ? this.state.semitoneOffset : this.state.speedPercent;
+    const current = control === 'transpose' ? this.getTotalSemitone() : this.getTotalSpeed();
     this.editingValueDraft = String(current);
     this.editingValueInitial = current;
     this.render();
@@ -847,9 +883,9 @@ class PopupApp {
     this.editingValueInitial = null;
 
     if (control === 'transpose') {
-      this.setSemitone(parsed);
+      this.setSemitone(this.toManualSemitone(parsed));
     } else {
-      this.setSpeed(parsed);
+      this.setSpeed(this.toManualSpeed(parsed));
     }
   }
 
@@ -1065,8 +1101,7 @@ class PopupApp {
           </div>
         </header>
         <main class="popup__content">
-          ${this.renderTransposeBlock()}
-          ${this.renderSpeedBlock()}
+          ${this.renderMediaControls()}
           ${this.renderTwitchSection()}
           ${this.renderBindingsEntry(connection.connected)}
           ${this.renderTestEventsBlock()}
@@ -1075,6 +1110,20 @@ class PopupApp {
         ${this.renderDiagnosticsPanel()}
       </div>
     `;
+  }
+
+  private renderMediaControls(): string {
+    if (this.state.mediaStatus === 'unsupported') {
+      return `
+        <section class="control-block control-block--unsupported" aria-live="polite">
+          <div class="control-block__row control-block__row--top">
+            <h2 class="control-block__title">${i18n.t('mediaUnsupported.title')}</h2>
+          </div>
+          <p class="control-block__unsupported-message">${i18n.t('mediaUnsupported.description')}</p>
+        </section>
+      `;
+    }
+    return `${this.renderTransposeBlock()}${this.renderSpeedBlock()}`;
   }
 
   private renderTransposeBlock(): string {
@@ -1124,7 +1173,7 @@ class PopupApp {
             min="-12"
             max="12"
             step="1"
-            value="${this.state.semitoneOffset}"
+            value="${this.getTotalSemitone()}"
             data-role="transpose-slider"
             aria-labelledby="transpose-heading"
           />
@@ -1188,7 +1237,7 @@ class PopupApp {
             min="50"
             max="200"
             step="1"
-            value="${this.state.speedPercent}"
+            value="${this.getTotalSpeed()}"
             data-role="speed-slider"
             aria-labelledby="speed-heading"
           />
@@ -1878,20 +1927,24 @@ class PopupApp {
     const refreshButton = this.root.querySelector<HTMLButtonElement>('[data-action="refresh-rewards"]');
 
     transposeSlider?.addEventListener('input', (event) => {
-      const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
-      this.setSemitone(value, { render: false, persist: false });
+      const raw = Number.parseFloat((event.target as HTMLInputElement).value);
+      const manual = this.toManualSemitone(Number.isFinite(raw) ? raw : 0);
+      this.setSemitone(manual, { render: false, persist: false });
     });
     transposeSlider?.addEventListener('change', (event) => {
-      const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
-      this.setSemitone(value, { forcePersist: true, forceRender: true });
+      const raw = Number.parseFloat((event.target as HTMLInputElement).value);
+      const manual = this.toManualSemitone(Number.isFinite(raw) ? raw : 0);
+      this.setSemitone(manual, { forcePersist: true, forceRender: true });
     });
     speedSlider?.addEventListener('input', (event) => {
-      const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
-      this.setSpeed(value, { render: false, persist: false });
+      const raw = Number.parseFloat((event.target as HTMLInputElement).value);
+      const manual = this.toManualSpeed(Number.isFinite(raw) ? raw : 100);
+      this.setSpeed(manual, { render: false, persist: false });
     });
     speedSlider?.addEventListener('change', (event) => {
-      const value = Number.parseInt((event.target as HTMLInputElement).value, 10);
-      this.setSpeed(value, { forcePersist: true, forceRender: true });
+      const raw = Number.parseFloat((event.target as HTMLInputElement).value);
+      const manual = this.toManualSpeed(Number.isFinite(raw) ? raw : 100);
+      this.setSpeed(manual, { forcePersist: true, forceRender: true });
     });
     transposeDec?.addEventListener('click', () => this.adjustSemitone(-1));
     transposeInc?.addEventListener('click', () => this.adjustSemitone(1));

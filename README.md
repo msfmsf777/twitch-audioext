@@ -22,6 +22,10 @@ To load the extension in Chrome:
 2. Open `chrome://extensions` and enable **Developer mode**.
 3. Choose **Load unpacked** and select the generated `dist` directory.
 
+## Audio processing and licensing
+
+Phase 3 introduces real-time pitch shifting through the [Rubber Band Library](https://breakfastquay.com/rubberband/) compiled to WebAssembly via the [`rubberband-wasm`](https://www.npmjs.com/package/rubberband-wasm) package. Rubber Band is distributed under the GNU GPL; commercial distribution of the extension requires an appropriate Rubber Band license from Breakfast Quay. Review [their licensing guidance](https://breakfastquay.com/rubberband/license.html) before shipping the extension outside of open-source contexts.
+
 ### Twitch OAuth Setup
 
 1. Call `chrome.identity.getRedirectURL('twitch')` in the extension console to obtain the redirect URI. Unless you override the p

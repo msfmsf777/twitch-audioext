@@ -10,6 +10,7 @@ export type PopupToBackgroundMessage =
   | { type: 'POPUP_TWITCH_RECONNECT' }
   | { type: 'POPUP_TWITCH_DISCONNECT' }
   | { type: 'POPUP_REFRESH_REWARDS' }
+  | { type: 'POPUP_RESET_CONTROL'; control: 'pitch' | 'speed' }
   | {
       type: 'POPUP_TRIGGER_TEST_EVENT';
       payload: {
@@ -37,40 +38,20 @@ export type BackgroundToContentMessage =
   | {
       type: 'AUDIO_APPLY';
       payload: {
-        semitoneOffset?: number;
-        speedPercent?: number;
-        ttlSeconds?: number;
+        totalSemitoneOffset: number;
+        totalSpeedPercent: number;
+        manualSemitoneOffset: number;
+        manualSpeedPercent: number;
+        globalSemitoneOffset: number;
+        globalSpeedPercent: number;
       };
-    }
-  | { type: 'AUDIO_RESET' }
-  | {
-      type: 'AUDIO_EFFECT_APPLY';
-      payload: {
-        effectId: string;
-        pitch?: { op: 'add' | 'set'; semitones: number } | null;
-        speed?: { op: 'add' | 'set'; percent: number } | null;
-        delayMs?: number;
-        durationMs?: number | null;
-        source: 'event' | 'test';
-      };
-    }
-  | {
-      type: 'AUDIO_EFFECT_REVERT';
-      payload: { effectId: string };
     }
   | { type: 'PING' };
 
 export type ContentToBackgroundMessage =
   | { type: 'CONTENT_READY' }
   | { type: 'CONTENT_PONG' }
-  | {
-      type: 'AUDIO_STATUS';
-      status: 'idle' | 'active';
-    }
-  | {
-      type: 'AUDIO_EFFECTS_UPDATE';
-      payload: { semitoneOffset: number; speedPercent: number };
-    };
+  | { type: 'CONTENT_MEDIA_STATUS'; status: 'pending' | 'ready' | 'unsupported'; reason?: string };
 
 export type PopupToContentMessage =
   | { type: 'POPUP_APPLY_AUDIO'; payload: { semitoneOffset: number; speedPercent: number } }
