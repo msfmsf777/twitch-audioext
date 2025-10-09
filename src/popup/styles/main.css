@@ -192,6 +192,15 @@ input[type='range'] {
   margin: 0;
 }
 
+.control-block--unsupported {
+  text-align: center;
+}
+
+.control-block__unsupported-message {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
 .stepper {
   width: 32px;
   height: 32px;

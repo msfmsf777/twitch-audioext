@@ -17,8 +17,9 @@ async function clean() {
 async function bundle() {
   await build({
     entryPoints: {
-      'background': path.join(srcDir, 'background/index.ts'),
-      'content': path.join(srcDir, 'content/index.ts'),
+      background: path.join(srcDir, 'background/index.ts'),
+      content: path.join(srcDir, 'content/index.ts'),
+      'content/audio-worklet': path.join(srcDir, 'content/audio-worklet.ts'),
       'popup/index': path.join(srcDir, 'popup/index.ts')
     },
     outdir: outDir,
@@ -29,7 +30,8 @@ async function bundle() {
     format: 'esm',
     logLevel: 'info',
     loader: {
-      '.json': 'json'
+      '.json': 'json',
+      '.wasm': 'file'
     },
     define: {
       'process.env.TWITCH_CLIENT_ID': JSON.stringify(process.env.TWITCH_CLIENT_ID ?? ''),
