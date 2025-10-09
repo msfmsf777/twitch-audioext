@@ -85,6 +85,8 @@ export interface PopupPersistentState {
   speedPercent: number;
   effectSemitoneOffset: number;
   effectSpeedPercent: number;
+  mediaStatus: 'pending' | 'ready' | 'unsupported';
+  mediaReason: string | null;
   captureEvents: boolean;
   loggedIn: boolean;
   twitchDisplayName: string | null;
@@ -104,6 +106,8 @@ export function createDefaultPopupState(): PopupPersistentState {
     speedPercent: 100,
     effectSemitoneOffset: 0,
     effectSpeedPercent: 0,
+    mediaStatus: 'pending',
+    mediaReason: null,
     captureEvents: false,
     loggedIn: false,
     twitchDisplayName: null,

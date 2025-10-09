@@ -36,6 +36,10 @@
     "valueInputLabel": "Playback speed percentage",
     "invalidValue": "Enter a value between 50 and 200."
   },
+  "mediaUnsupported": {
+    "title": "Media unsupported",
+    "description": "No media found or unsupported on this page."
+  },
   "twitch": {
     "statusDisconnected": "Disconnected",
     "statusConnected": "Connected as {displayName}",

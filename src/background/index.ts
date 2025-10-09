@@ -51,6 +51,7 @@ const REWARD_REFRESH_DEBOUNCE_MS = 15_000;
 const EVENT_LOG_WRITE_THROTTLE_MS = 500;
 const MESSAGE_ID_TTL_MS = 5 * 60_000;
 const EFFECT_STORAGE_KEY = 'effectAdjustments';
+const PAGE_STATE_STORAGE_KEY = 'pageAudioState';
 const CHANNEL_REWARDS_STORAGE_KEY = 'channelRewards';
 const CHANNEL_REWARDS_UPDATED_AT_KEY = 'channelRewardsUpdatedAt';
 
@@ -105,6 +106,7 @@ interface ScheduledEffect {
   applyTimer: TimeoutHandle | null;
   revertTimer: TimeoutHandle | null;
   applied: boolean;
+  neutralize?: { pitch?: boolean; speed?: boolean };
 }
 
 interface HelixSubscription {
@@ -197,7 +199,24 @@ let eventLogWriteTimer: TimeoutHandle | null = null;
 let activeEffects: Map<string, ScheduledEffect> = new Map();
 let processedMessageIds: Map<string, number> = new Map();
 let effectAdjustments = { semitoneOffset: 0, speedPercent: 0 };
-let activeContentTabId: number | null = null;
+
+interface PageStateEntry {
+  semitoneOffset: number;
+  speedPercent: number;
+}
+
+interface TabSession {
+  tabId: number;
+  pageKey: string | null;
+  manual: PageStateEntry;
+  mediaStatus: 'pending' | 'ready' | 'unsupported';
+  mediaReason: string | null;
+  engineInjected: boolean;
+}
+
+const pageState = new Map<string, PageStateEntry>();
+const tabSessions = new Map<number, TabSession>();
+let activePopupTabId: number | null = null;
 
 function sanitizeBindingDefinition(binding: BindingDefinition): BindingDefinition {
   if (!binding || typeof binding !== 'object') {
@@ -241,6 +260,186 @@ function sanitizeBindings(bindings: BindingDefinition[] | undefined | null): Bin
     return next;
   });
   return changed ? sanitized : bindings;
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(max, Math.max(min, value));
+}
+
+function computePageKey(url: string | undefined | null): string | null {
+  if (!url) {
+    return null;
+  }
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function getPageStateEntry(key: string | null): PageStateEntry {
+  if (!key) {
+    return { semitoneOffset: 0, speedPercent: 100 };
+  }
+  const existing = pageState.get(key);
+  if (!existing) {
+    return { semitoneOffset: 0, speedPercent: 100 };
+  }
+  return { semitoneOffset: existing.semitoneOffset, speedPercent: existing.speedPercent };
+}
+
+function serializePageState(): Record<string, PageStateEntry> {
+  const result: Record<string, PageStateEntry> = {};
+  for (const [key, value] of pageState.entries()) {
+    result[key] = { semitoneOffset: value.semitoneOffset, speedPercent: value.speedPercent };
+  }
+  return result;
+}
+
+async function persistPageState(): Promise<void> {
+  await chrome.storage.local.set({ [PAGE_STATE_STORAGE_KEY]: serializePageState() });
+}
+
+function getOrCreateTabSession(tabId: number, pageKey: string | null): TabSession {
+  let session = tabSessions.get(tabId);
+  if (!session) {
+    session = {
+      tabId,
+      pageKey,
+      manual: getPageStateEntry(pageKey),
+      mediaStatus: 'pending',
+      mediaReason: null,
+      engineInjected: false
+    };
+    tabSessions.set(tabId, session);
+    return session;
+  }
+  if (pageKey !== session.pageKey) {
+    session.pageKey = pageKey;
+    session.manual = getPageStateEntry(pageKey);
+    session.mediaStatus = 'pending';
+    session.mediaReason = null;
+    session.engineInjected = false;
+  }
+  return session;
+}
+
+function computeAppliedState(manual: PageStateEntry): { pitch: number; speed: number } {
+  const pitch = clampNumber(manual.semitoneOffset + effectAdjustments.semitoneOffset, -12, 12);
+  const speed = clampNumber(manual.speedPercent + effectAdjustments.speedPercent, 50, 200);
+  return { pitch, speed };
+}
+
+async function getActiveBrowserTab(): Promise<chrome.tabs.Tab | null> {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tabs[0] ?? null;
+  } catch (error) {
+    console.warn('[background] Failed to query active tab', error);
+    return null;
+  }
+}
+
+async function dispatchAudioCommand(tabId: number, message: BackgroundToContentMessage): Promise<void> {
+  try {
+    await new Promise<void>((resolve) => {
+      chrome.tabs.sendMessage(tabId, message, () => {
+        void chrome.runtime.lastError;
+        resolve();
+      });
+    });
+  } catch (error) {
+    console.warn('[background] Failed to send audio command', error);
+  }
+}
+
+async function applyAudioStateToTab(tabId: number): Promise<void> {
+  const session = tabSessions.get(tabId);
+  if (!session || !session.engineInjected) {
+    return;
+  }
+  const totals = computeAppliedState(session.manual);
+  const message: BackgroundToContentMessage = {
+    type: 'AUDIO_APPLY',
+    payload: {
+      totalSemitoneOffset: totals.pitch,
+      totalSpeedPercent: totals.speed,
+      manualSemitoneOffset: session.manual.semitoneOffset,
+      manualSpeedPercent: session.manual.speedPercent,
+      globalSemitoneOffset: effectAdjustments.semitoneOffset,
+      globalSpeedPercent: effectAdjustments.speedPercent
+    }
+  };
+  await dispatchAudioCommand(tabId, message);
+}
+
+async function broadcastAudioState(): Promise<void> {
+  const promises: Promise<void>[] = [];
+  for (const session of tabSessions.values()) {
+    if (!session.engineInjected) {
+      continue;
+    }
+    promises.push(applyAudioStateToTab(session.tabId));
+  }
+  await Promise.all(promises);
+}
+
+async function ensureContentScriptInjected(tabId: number): Promise<void> {
+  const session = tabSessions.get(tabId);
+  if (session?.engineInjected) {
+    return;
+  }
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+    if (session) {
+      session.engineInjected = true;
+    }
+  } catch (error) {
+    console.warn('[background] Failed to inject content script', error);
+  }
+}
+
+async function resetEffectAxis(axis: 'pitch' | 'speed'): Promise<void> {
+  let changed = false;
+  for (const effect of activeEffects.values()) {
+    if (!effect.applied) {
+      continue;
+    }
+    const hasOperation = effect.operations.some((op) => op.kind === axis);
+    if (!hasOperation) {
+      continue;
+    }
+    effect.neutralize = effect.neutralize ?? {};
+    if (effect.neutralize[axis]) {
+      continue;
+    }
+    effect.neutralize[axis] = true;
+    changed = true;
+  }
+  if (changed) {
+    await pushEffectAdjustmentsFromActive();
+    return;
+  }
+  if (axis === 'pitch' && effectAdjustments.semitoneOffset !== 0) {
+    effectAdjustments = { ...effectAdjustments, semitoneOffset: 0 };
+  } else if (axis === 'speed' && effectAdjustments.speedPercent !== 0) {
+    effectAdjustments = { ...effectAdjustments, speedPercent: 0 };
+  } else {
+    return;
+  }
+  await chrome.storage.local.set({ [EFFECT_STORAGE_KEY]: effectAdjustments });
+  await updateCachedState(
+    {
+      effectSemitoneOffset: effectAdjustments.semitoneOffset,
+      effectSpeedPercent: effectAdjustments.speedPercent
+    },
+    { persist: true, broadcast: true }
+  );
+  await broadcastAudioState();
 }
 
 function sanitizePopupState(state: PopupPersistentState): PopupPersistentState {
@@ -344,6 +543,20 @@ async function init(): Promise<void> {
     effectSemitoneOffset: effectAdjustments.semitoneOffset ?? 0,
     effectSpeedPercent: effectAdjustments.speedPercent ?? 0
   };
+  const storedPages = await loadFromStorage(
+    PAGE_STATE_STORAGE_KEY,
+    {} as Record<string, { semitoneOffset?: number; speedPercent?: number }>
+  );
+  if (storedPages && typeof storedPages === 'object') {
+    for (const [key, value] of Object.entries(storedPages)) {
+      if (!value || typeof value !== 'object') {
+        continue;
+      }
+      const semitone = clampNumber(Number((value as any).semitoneOffset ?? 0), -12, 12);
+      const speed = clampNumber(Number((value as any).speedPercent ?? 100), 50, 200);
+      pageState.set(key, { semitoneOffset: semitone, speedPercent: speed });
+    }
+  }
   twitchAuth = await loadFromStorage(TWITCH_AUTH_STORAGE_KEY, null);
   await syncStateWithAuth({ persist: false, broadcast: false });
 
@@ -1120,6 +1333,7 @@ async function updateEffectAdjustmentsFromStorageValue(value: unknown): Promise<
     { effectSemitoneOffset: semitone, effectSpeedPercent: speed },
     { persist: true, broadcast: true }
   );
+  await broadcastAudioState();
 }
 
 async function pushEffectAdjustmentsFromActive(): Promise<void> {
@@ -1131,8 +1345,14 @@ async function pushEffectAdjustmentsFromActive(): Promise<void> {
     }
     for (const op of effect.operations) {
       if (op.kind === 'pitch') {
+        if (effect.neutralize?.pitch) {
+          continue;
+        }
         semitone += op.semitones;
       } else if (op.kind === 'speed') {
+        if (effect.neutralize?.speed) {
+          continue;
+        }
         speed += op.percent;
       }
     }
@@ -1151,6 +1371,7 @@ async function pushEffectAdjustmentsFromActive(): Promise<void> {
     { effectSemitoneOffset: semitone, effectSpeedPercent: speed },
     { persist: true, broadcast: true }
   );
+  await broadcastAudioState();
 }
 
 async function sendChatMessage(
@@ -1194,23 +1415,6 @@ async function sendChatMessage(
   }
 }
 
-async function sendEffectMessage(message: BackgroundToContentMessage): Promise<void> {
-  try {
-    const tabId = activeContentTabId;
-    if (typeof tabId !== 'number') {
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      chrome.tabs.sendMessage(tabId, message, () => {
-        void chrome.runtime.lastError;
-        resolve();
-      });
-    });
-  } catch (error) {
-    console.warn('[background] Failed to send effect message', error);
-  }
-}
-
 async function applyScheduledEffect(effectId: string): Promise<void> {
   const effect = activeEffects.get(effectId);
   if (!effect || effect.applied) {
@@ -1226,17 +1430,6 @@ async function applyScheduledEffect(effectId: string): Promise<void> {
   const speedOp = effect.operations.find((op) => op.kind === 'speed') as
     | Extract<EffectOperation, { kind: 'speed' }>
     | undefined;
-  await sendEffectMessage({
-    type: 'AUDIO_EFFECT_APPLY',
-    payload: {
-      effectId: effect.id,
-      pitch: pitchOp ? { op: pitchOp.op, semitones: pitchOp.semitones } : null,
-      speed: speedOp ? { op: speedOp.op, percent: speedOp.percent } : null,
-      delayMs: effect.delayMs,
-      durationMs: effect.durationMs,
-      source: effect.eventSource === 'test' ? 'test' : 'event'
-    }
-  });
   effect.applied = true;
   updateEventLogEntry(effect.eventLogId ?? '', { status: 'applied' });
   await pushEffectAdjustmentsFromActive();
@@ -1259,9 +1452,6 @@ async function revertScheduledEffect(effectId: string, status: EventLogStatus = 
   if (effect.revertTimer) {
     clearTimeout(effect.revertTimer);
     effect.revertTimer = null;
-  }
-  if (effect.applied) {
-    await sendEffectMessage({ type: 'AUDIO_EFFECT_REVERT', payload: { effectId } });
   }
   activeEffects.delete(effectId);
   if (effect.eventLogId) {
@@ -2144,7 +2334,9 @@ async function acceptPopupState(nextState: PopupPersistentState): Promise<void> 
   cachedState = sanitizePopupState({
     ...nextState,
     loggedIn: cachedState.loggedIn,
-    twitchDisplayName: cachedState.twitchDisplayName
+    twitchDisplayName: cachedState.twitchDisplayName,
+    mediaStatus: cachedState.mediaStatus,
+    mediaReason: cachedState.mediaReason
   });
   await persistCachedState();
 }
@@ -2156,12 +2348,76 @@ async function handlePopupMessage(
   switch (message.type) {
     case 'POPUP_READY':
     case 'POPUP_REQUEST_STATE': {
+      const activeTab = await getActiveBrowserTab();
+      if (activeTab?.id != null) {
+        activePopupTabId = activeTab.id;
+        const pageKey = computePageKey(activeTab.url ?? (activeTab as any)?.pendingUrl ?? null);
+        const session = getOrCreateTabSession(activeTab.id, pageKey);
+        cachedState = {
+          ...cachedState,
+          semitoneOffset: session.manual.semitoneOffset,
+          speedPercent: session.manual.speedPercent,
+          mediaStatus: session.mediaStatus,
+          mediaReason: session.mediaReason
+        };
+        await ensureContentScriptInjected(activeTab.id);
+        await applyAudioStateToTab(activeTab.id);
+      } else {
+        activePopupTabId = null;
+        cachedState = { ...cachedState, mediaStatus: 'pending', mediaReason: null };
+      }
       respondToPopup(sendResponse, { type: 'BACKGROUND_STATE', state: cachedState });
       pushDiagnostics();
       return;
     }
     case 'POPUP_UPDATE_STATE': {
       await acceptPopupState(message.state);
+      if (activePopupTabId != null) {
+        const session = tabSessions.get(activePopupTabId);
+        if (session) {
+          const nextManual: PageStateEntry = {
+            semitoneOffset: clampNumber(message.state.semitoneOffset, -12, 12),
+            speedPercent: clampNumber(message.state.speedPercent, 50, 200)
+          };
+          const changed =
+            session.manual.semitoneOffset !== nextManual.semitoneOffset ||
+            session.manual.speedPercent !== nextManual.speedPercent;
+          if (changed) {
+            session.manual = nextManual;
+            if (session.pageKey) {
+              pageState.set(session.pageKey, { ...nextManual });
+              await persistPageState();
+            }
+            await applyAudioStateToTab(session.tabId);
+          }
+        }
+      }
+      respondToPopup(sendResponse, { type: 'BACKGROUND_STATE', state: cachedState });
+      return;
+    }
+    case 'POPUP_RESET_CONTROL': {
+      if (activePopupTabId != null) {
+        const session = tabSessions.get(activePopupTabId);
+        if (session) {
+          if (message.control === 'pitch') {
+            session.manual = { ...session.manual, semitoneOffset: 0 };
+          } else {
+            session.manual = { ...session.manual, speedPercent: 100 };
+          }
+          if (session.pageKey) {
+            pageState.set(session.pageKey, { ...session.manual });
+            await persistPageState();
+          }
+          cachedState = {
+            ...cachedState,
+            semitoneOffset: session.manual.semitoneOffset,
+            speedPercent: session.manual.speedPercent
+          };
+          await persistCachedState();
+          await applyAudioStateToTab(session.tabId);
+        }
+      }
+      await resetEffectAxis(message.control);
       respondToPopup(sendResponse, { type: 'BACKGROUND_STATE', state: cachedState });
       return;
     }
@@ -2204,32 +2460,40 @@ async function handlePopupMessage(
   }
 }
 
-function handleContentMessage(message: ContentToBackgroundMessage, sender?: chrome.runtime.MessageSender): void {
+async function handleContentMessage(
+  message: ContentToBackgroundMessage,
+  sender?: chrome.runtime.MessageSender
+): Promise<void> {
+  const tabId = sender?.tab?.id;
   switch (message.type) {
-    case 'CONTENT_READY':
+    case 'CONTENT_READY': {
       console.info('[background] Content script is ready');
-      if (sender?.tab?.id != null) {
-        activeContentTabId = sender.tab.id;
+      if (tabId != null) {
+        const pageKey = computePageKey(sender?.tab?.url ?? (sender?.tab as any)?.pendingUrl ?? null);
+        const session = getOrCreateTabSession(tabId, pageKey);
+        session.engineInjected = true;
+        await applyAudioStateToTab(tabId);
       }
       break;
+    }
+    case 'CONTENT_MEDIA_STATUS': {
+      if (tabId != null) {
+        const session = tabSessions.get(tabId);
+        if (session) {
+          session.mediaStatus = message.status;
+          session.mediaReason = message.reason ?? null;
+          if (activePopupTabId === tabId) {
+            await updateCachedState(
+              { mediaStatus: message.status, mediaReason: message.reason ?? null },
+              { persist: false, broadcast: true }
+            );
+          }
+        }
+      }
+      break;
+    }
     case 'CONTENT_PONG':
       console.debug('[background] Received pong from content script');
-      break;
-    case 'AUDIO_STATUS':
-      console.debug('[background] Audio status update', message.status);
-      break;
-    case 'AUDIO_EFFECTS_UPDATE':
-      effectAdjustments = {
-        semitoneOffset: message.payload.semitoneOffset,
-        speedPercent: message.payload.speedPercent
-      };
-      void updateCachedState(
-        {
-          effectSemitoneOffset: message.payload.semitoneOffset,
-          effectSpeedPercent: message.payload.speedPercent
-        },
-        { persist: true, broadcast: true }
-      );
       break;
     default:
       break;
@@ -2251,10 +2515,41 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   }
 
   if (isContentMessage(message)) {
-    handleContentMessage(message, _sender);
+    void handleContentMessage(message, _sender);
   }
 
   return false;
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabSessions.delete(tabId);
+  if (activePopupTabId === tabId) {
+    activePopupTabId = null;
+  }
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === 'loading') {
+    const pageKey = computePageKey(tab.url ?? (tab as any)?.pendingUrl ?? null);
+    const session = tabSessions.get(tabId);
+    if (session) {
+      session.pageKey = pageKey;
+      session.manual = getPageStateEntry(pageKey);
+      session.mediaStatus = 'pending';
+      session.mediaReason = null;
+      session.engineInjected = false;
+      if (activePopupTabId === tabId) {
+        cachedState = {
+          ...cachedState,
+          semitoneOffset: session.manual.semitoneOffset,
+          speedPercent: session.manual.speedPercent,
+          mediaStatus: 'pending',
+          mediaReason: null
+        };
+        broadcastState();
+      }
+    }
+  }
 });
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -2280,16 +2575,3 @@ chrome.storage.onChanged.addListener((changes, area) => {
     }
   }
 });
-
-export function dispatchAudioCommand(tabId: number, message: BackgroundToContentMessage): void {
-  try {
-    chrome.tabs.sendMessage(tabId, message, () => {
-      const error = chrome.runtime.lastError;
-      if (error) {
-        console.warn('[background] Failed to send audio command', error.message);
-      }
-    });
-  } catch (error) {
-    console.warn('[background] Failed to send audio command', error);
-  }
-}
